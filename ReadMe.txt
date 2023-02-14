@@ -1,8 +1,3 @@
-Team:
-	Desaraju Harsha Vardhan 
-	Srinivasula Koushik 
-
-
 Please go through the report to understand our project details.
 
 The main code for identifing a text on an image is OCR.ipynb
