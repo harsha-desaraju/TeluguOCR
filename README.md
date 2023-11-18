@@ -12,6 +12,6 @@ The Encoding folder contains the utf codes of Telugu.
 
 The pre-trained model required GPU to run.
 
-PS: The above work is an implementation of the papaer, 
+PS: The above work is an implementation of the paper, 
 K. Chandra Prakash, Y. M. Srikar, G. Trishal, S. Mandal and S. S. Channappayya, "Optical Character Recognition (OCR) for Telugu: Database, Algorithm and Application" 
 
