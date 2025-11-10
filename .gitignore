@@ -98,3 +98,7 @@ cython_debug/
 # macOS system files
 ehthumbs.db
 Icon?
+
+correction_model/data/
+correction_model/new_data/
+test.py
