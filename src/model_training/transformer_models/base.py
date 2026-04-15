@@ -61,8 +61,8 @@ class SelfAttention(nn.Module):
         keys = self.k_proj(x)
         values = self.v_proj(x)
 
-        att_weights = queries @ torch.transpose(keys, 1, 2)
-        scaled_att_weights = self.softmax(att_weights/math.sqrt(self.proj_dim))
+        att_weights = (queries @ torch.transpose(keys, 1, 2)/math.sqrt(self.proj_dim))
+        scaled_att_weights = self.softmax(att_weights)
         embeds = scaled_att_weights @ values
         return embeds
 
@@ -96,8 +96,8 @@ class MultiHeadAttention(nn.Module):
         keys = x @ self.k_proj          # (B, num_heads, T, p)
         values = x @ self.v_proj        # (B, num_heads, T, p)
 
-        att_weights = queries @ torch.transpose(keys, 2, 3)                 # (B, num_heads, T, T)
-        scaled_att_weights = self.softmax(att_weights/math.sqrt(self.proj_dim))        # (B, num_heads, T, T)
+        att_weights = (queries @ torch.transpose(keys, 2, 3)/math.sqrt(self.proj_dim))                 # (B, num_heads, T, T)
+        scaled_att_weights = self.softmax(att_weights)        # (B, num_heads, T, T)
         embeds = scaled_att_weights @ values                                           # (B, num_heads, T, p)
         B, num_heads, T, p = embeds.shape
         embeds = embeds.permute(0, 2, 1, 3)
@@ -139,9 +139,9 @@ class MultiHeadCrossAttention(nn.Module):
         keys = encoder_output @ self.k_proj          # (B, num_heads, T, p)
         values = encoder_output @ self.v_proj        # (B, num_heads, T, p)
 
-        att_weights = queries @ torch.transpose(keys, 2, 3)                 # (B, num_heads, T, T)
-        scaled_att_weights = self.softmax(att_weights/math.sqrt(self.proj_dim))        # (B, num_heads, T, T)
-        embeds = scaled_att_weights @ values                                           # (B, num_heads, T, p)
+        att_weights = (queries @ torch.transpose(keys, 2, 3)/math.sqrt(self.proj_dim))                 # (B, num_heads, T, T)
+        scaled_att_weights = self.softmax(att_weights)                                                             # (B, num_heads, T, T)
+        embeds = scaled_att_weights @ values                                                                       # (B, num_heads, T, p)
         B, num_heads, T, p = embeds.shape
         embeds = embeds.permute(0, 2, 1, 3)
         embeds = embeds.reshape(B, T, num_heads*p)
@@ -164,8 +164,8 @@ class CausalSelfAttention(SelfAttention):
 
         att_weights = queries @ torch.transpose(keys, 1, 2)
         causal_mask = torch.triu(torch.full((att_weights.shape[-1], att_weights.shape[-1]), fill_value=float('-inf'), device=att_weights.device), diagonal=1)
-        att_weights = att_weights + causal_mask
-        scaled_att_weights = self.softmax(att_weights/math.sqrt(self.proj_dim))
+        att_weights = (att_weights + causal_mask)/math.sqrt(self.proj_dim)
+        scaled_att_weights = self.softmax(att_weights)
         embeds = scaled_att_weights @ values
         return embeds
 
@@ -186,8 +186,8 @@ class CausalMultiHeadAttention(MultiHeadAttention):
 
         causal_mask = torch.triu(torch.full((att_weights.shape[-1], att_weights.shape[-1]), fill_value=float('-inf'), device=att_weights.device), diagonal=1)
         att_weights = att_weights + causal_mask.unsqueeze(0).unsqueeze(0)
-
-        scaled_att_weights = self.softmax(att_weights / math.sqrt(self.proj_dim))
+        att_weights = att_weights/math.sqrt(self.proj_dim)
+        scaled_att_weights = self.softmax(att_weights)
         embeds = scaled_att_weights @ values
         B, num_heads, T, p = embeds.shape
         embeds = embeds.permute(0, 2, 1, 3)
