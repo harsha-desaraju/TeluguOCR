@@ -191,19 +191,3 @@ if __name__ == '__main__':
 
     print("\nDecoder Benchmark:")
     benchmark_model(decoder, batch_size, seq_len=num_tokens, embed_dim=embed_dim, vocab_size=vocab_size)
-
-    """
-    Device: mps
-    No. of parameters in Encoder model: 46348288
-    No. of parameters in Decoder model: 67373056
-    
-    Encoder Benchmark:
-    Avg forward time : 0.14980 sec
-    Avg backward time: 0.27210 sec
-    Tokens/sec: 27343.53
-    
-    Decoder Benchmark:
-    Avg forward time : 0.26579 sec
-    Avg backward time: 0.45597 sec
-    Tokens/sec: 15410.87
-    """
