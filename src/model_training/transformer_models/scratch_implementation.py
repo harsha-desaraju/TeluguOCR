@@ -261,7 +261,7 @@ class Encoder(nn.Module):
         self.positional_encoding = nn.Parameter(
             nn.init.kaiming_uniform_(torch.randn((ctx_len, embed_dim)), a=math.sqrt(5)), requires_grad=True
         )
-        self.transformer_blocks = nn.Sequential(*[
+        self.encoder_transformer_blocks = nn.Sequential(*[
             EncoderTransformerBlock(embed_dim, num_heads, ffn_hidden_dim)
             for _ in range(num_blocks)
         ])
@@ -269,7 +269,7 @@ class Encoder(nn.Module):
     def forward(self, x):
         embeds = self.embedding_layer(x)
         embeds = embeds + self.positional_encoding[:embeds.shape[-2]]
-        cont_embeds = self.transformer_blocks(embeds)
+        cont_embeds = self.encoder_transformer_blocks(embeds)
         return cont_embeds
 
 
@@ -283,7 +283,7 @@ class Decoder(nn.Module):
         self.positional_encoding = nn.Parameter(
             nn.init.kaiming_uniform_(torch.randn((ctx_len, embed_dim)), a=math.sqrt(5)), requires_grad=True
         )
-        self.transformer_blocks = nn.ModuleList([
+        self.decoder_transformer_blocks = nn.ModuleList([
             DecoderTransformerBlock(embed_dim, num_heads, ffn_hidden_dim)
             for _ in range(num_blocks)
         ])
@@ -293,7 +293,7 @@ class Decoder(nn.Module):
     def forward(self, x, encoder_output):
         embeds = self.embedding_layer(x)
         embeds = embeds + self.positional_encoding[:embeds.shape[-2]]
-        for module in self.transformer_blocks:
+        for module in self.decoder_transformer_blocks:
             embeds = module(embeds, encoder_output)
         logits = self.linear(embeds)
         return logits
@@ -303,43 +303,24 @@ class Decoder(nn.Module):
 
 if __name__ == '__main__':
 
-    vocab_size = 100
-    embed_dim = 8
-    ctx_len = 64
-    num_encoder_blocks = 6
-    num_decoder_blocks = 6
-    num_heads = 4
-    ffn_hidden_size = 32
+    vocab_size = 16384
+    embed_dim = 512
+    ctx_len = 256
+    num_encoder_blocks = 12
+    num_decoder_blocks = 12
+    num_heads = 8
+    ffn_hidden_size = 4*embed_dim
 
 
-    batch_size, num_tokens = 10, 9
+    batch_size, num_tokens = 16, ctx_len
 
     inp = torch.randint(0, vocab_size, (batch_size, num_tokens))
     print(inp.shape)
 
-
     encoder = Encoder(vocab_size, embed_dim, ctx_len, num_encoder_blocks, num_heads, ffn_hidden_size)
-    encoder_output = encoder(inp)
-    print(encoder_output.shape)
+    encoder_out = encoder(inp)
+    print(encoder_out.shape)
 
     decoder = Decoder(vocab_size, embed_dim, ctx_len, num_decoder_blocks, num_heads, ffn_hidden_size)
-    decoder_output = decoder(inp, encoder_output)
-    print(decoder_output.shape)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    decoder_out = decoder(inp, encoder_out)
+    print(decoder_out.shape)
