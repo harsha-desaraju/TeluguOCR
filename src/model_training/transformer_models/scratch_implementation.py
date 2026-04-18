@@ -303,24 +303,37 @@ class Decoder(nn.Module):
 
 if __name__ == '__main__':
 
+    from src.model_training.transformer_models.benchmarking import benchmark_model
+
+    DEVICE = "mps"
+
     vocab_size = 16384
     embed_dim = 512
     ctx_len = 256
     num_encoder_blocks = 12
     num_decoder_blocks = 12
     num_heads = 8
-    ffn_hidden_size = 4*embed_dim
-
+    ffn_hidden_size = 4 * embed_dim
 
     batch_size, num_tokens = 16, ctx_len
 
-    inp = torch.randint(0, vocab_size, (batch_size, num_tokens))
-    print(inp.shape)
-
     encoder = Encoder(vocab_size, embed_dim, ctx_len, num_encoder_blocks, num_heads, ffn_hidden_size)
-    encoder_out = encoder(inp)
-    print(encoder_out.shape)
-
     decoder = Decoder(vocab_size, embed_dim, ctx_len, num_decoder_blocks, num_heads, ffn_hidden_size)
-    decoder_out = decoder(inp, encoder_out)
-    print(decoder_out.shape)
+
+    print(f"Device: {DEVICE}")
+
+    num_params = 0
+    for layer in encoder.parameters():
+        num_params += layer.numel()
+    print(f"No. of parameters in Encoder model: {num_params}")
+
+    num_params = 0
+    for layer in decoder.parameters():
+        num_params += layer.numel()
+    print(f"No. of parameters in Decoder model: {num_params}")
+
+    print("\nEncoder Benchmark:")
+    benchmark_model(encoder, batch_size, seq_len=num_tokens, embed_dim=embed_dim, vocab_size=vocab_size)
+
+    print("\nDecoder Benchmark:")
+    benchmark_model(decoder, batch_size, seq_len=num_tokens, embed_dim=embed_dim, vocab_size=vocab_size)
