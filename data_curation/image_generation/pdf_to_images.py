@@ -7,7 +7,7 @@ import pytesseract
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
-
+from joblib import Parallel, delayed
 
 
 def page_to_line_images(img: np.ndarray, min_width: int, min_height: int, max_width_percent: float, max_height_percent: float):
@@ -52,14 +52,8 @@ def page_to_line_images(img: np.ndarray, min_width: int, min_height: int, max_wi
 
 def pdf_to_line_images(file_path: Path, out_dir: Path, first_page: int | None = None):
 
-    images = pdf2image.convert_from_path(str(file_path), dpi=IMAGE_DPI, first_page=first_page, thread_count=8)
+    images = pdf2image.convert_from_path(str(file_path), dpi=IMAGE_DPI, first_page=first_page, thread_count=1)
     images = [np.array(image) for image in images]
-
-    line_images = []
-    for image in images:
-        line_imgs = page_to_line_images(image, min_width=MIN_WIDTH, min_height=MIN_HEIGHT,
-                                        max_width_percent=MAX_WIDTH_PERCENT, max_height_percent=MAX_HEIGHT_PERCENT)
-        line_images.append(line_imgs)
 
     # Save
     file_dir = out_dir / f"{file_path.stem}"
@@ -67,11 +61,15 @@ def pdf_to_line_images(file_path: Path, out_dir: Path, first_page: int | None = 
 
     first_page = first_page if first_page else 1
 
-    for page_num, img_lst in enumerate(line_images, first_page):
-        for line_num, line_img in enumerate(img_lst):
+    for page_num, image in enumerate(images, first_page):
+        line_imgs = page_to_line_images(image, min_width=MIN_WIDTH, min_height=MIN_HEIGHT,
+                                        max_width_percent=MAX_WIDTH_PERCENT, max_height_percent=MAX_HEIGHT_PERCENT)
+        for line_num,  line_img in enumerate(line_imgs):
             img_path = file_dir / f"{page_num}_{line_num}.{IMAGE_FORMAT}"
             line_img = Image.fromarray(line_img)
             line_img.save(img_path, IMAGE_FORMAT)
+
+    print(f"{file_path.stem} done!", flush=True)
 
 
 
@@ -83,15 +81,23 @@ if __name__ == '__main__':
     MAX_WIDTH_PERCENT = 0.95
     MAX_HEIGHT_PERCENT = 0.05
     IMAGE_FORMAT = "jpeg"
+    MAX_FILE_SIZE_IN_MB = 40
+    NUM_JOBS = os.cpu_count() - 2
 
     # pdf_file_path = Path("/Users/xai/Personal/Projects/TeluguOCR/data/pdf_files/free_gurukul/AnjaneyaDandakam_342.pdf")
 
     output_dir = Path(__file__).parents[2] / "data/images/sanatanadharm"
 
     pdfs_folder = Path(__file__).parents[2] / "data/pdf_files/sanatanadharm"
-    pdf_file_paths = Path(pdfs_folder).rglob("*.pdf")
+    pdf_file_paths = list(Path(pdfs_folder).rglob("*.pdf"))
 
-    for pdf_file_path in tqdm(pdf_file_paths):
-        print(pdf_file_path.name)
-        pdf_to_line_images(pdf_file_path, output_dir, first_page=None)
+    # Remove files which are already done
+    done_files = os.listdir(output_dir)
+    pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stem not in done_files]
+
+    # Limit the PDFs to files of MAX_FILE_SIZE_IN_MB size
+    pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stat().st_size/1e6 < MAX_FILE_SIZE_IN_MB]
+
+    with Parallel(n_jobs=NUM_JOBS) as parallel:
+        parallel([delayed(pdf_to_line_images)(pdf_path, output_dir) for pdf_path in pdf_file_paths])
 
