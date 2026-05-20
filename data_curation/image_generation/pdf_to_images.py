@@ -6,8 +6,13 @@ import numpy as np
 import pytesseract
 from pathlib import Path
 from PIL import Image
-from tqdm import tqdm
 from joblib import Parallel, delayed
+from datasets import Dataset, Features, Value, Image as DImage
+from huggingface_hub import login
+from dotenv import load_dotenv
+load_dotenv()
+
+login(os.getenv("HF_TOKEN"))
 
 
 def page_to_line_images(img: np.ndarray, min_width: int, min_height: int, max_width_percent: float, max_height_percent: float):
@@ -73,6 +78,51 @@ def pdf_to_line_images(file_path: Path, out_dir: Path, first_page: int | None = 
 
 
 
+
+def pdf_to_line_images_hf(file_path: Path, first_page: int | None = None):
+    try:
+
+        images = pdf2image.convert_from_path(str(file_path), dpi=IMAGE_DPI, first_page=first_page, thread_count=2)
+        images = [np.array(image) for image in images]
+
+        file_name = file_path.stem
+
+
+        first_page = first_page if first_page else 1
+
+        ds_buffer = []
+        for page_num, image in enumerate(images, first_page):
+            line_imgs = page_to_line_images(image, min_width=MIN_WIDTH, min_height=MIN_HEIGHT,
+                                            max_width_percent=MAX_WIDTH_PERCENT, max_height_percent=MAX_HEIGHT_PERCENT)
+
+            for line_img in line_imgs:
+                ds_buffer.append({
+                    "line_image": Image.fromarray(line_img),
+                    "file_name": file_name,
+                    "page_number": page_num
+                })
+
+        # Upload to hugging face
+        ds_features = Features({
+                "line_image": DImage(),
+                "file_name": Value("string"),
+                "page_number": Value("int64")
+            })
+
+        dataset = Dataset.from_list(ds_buffer, features=ds_features)
+
+        dataset.push_to_hub(
+            repo_id=HF_REPO_ID,
+            commit_message=f"Uploaded {file_name}"
+        )
+
+        print(f"Uploaded {file_name} to the HF hub!", flush=True)
+
+    except Exception as e:
+        print(f"The following exception occurred while processing {file_path.stem} file:\n\n{str(e)}\n\n", flush=True)
+
+
+
 if __name__ == '__main__':
 
     IMAGE_DPI = 300
@@ -82,22 +132,22 @@ if __name__ == '__main__':
     MAX_HEIGHT_PERCENT = 0.05
     IMAGE_FORMAT = "jpeg"
     MAX_FILE_SIZE_IN_MB = 40
-    NUM_JOBS = os.cpu_count() - 2
+    NUM_JOBS = 1
+    HF_REPO_ID = "harsha-desaraju/telugu-text-line-images"
 
-    # pdf_file_path = Path("/Users/xai/Personal/Projects/TeluguOCR/data/pdf_files/free_gurukul/AnjaneyaDandakam_342.pdf")
+    # output_dir = Path(__file__).parents[2] / "data/images/sanatanadharm"
 
-    output_dir = Path(__file__).parents[2] / "data/images/sanatanadharm"
-
-    pdfs_folder = Path(__file__).parents[2] / "data/pdf_files/sanatanadharm"
+    pdfs_folder = Path(__file__).parents[2] / "data/pdf_files/free_gurukul"
     pdf_file_paths = list(Path(pdfs_folder).rglob("*.pdf"))
 
-    # Remove files which are already done
-    done_files = os.listdir(output_dir)
-    pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stem not in done_files]
+    # # Remove files which are already done
+    # done_files = os.listdir(output_dir)
+    # pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stem not in done_files]
 
     # Limit the PDFs to files of MAX_FILE_SIZE_IN_MB size
     pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stat().st_size/1e6 < MAX_FILE_SIZE_IN_MB]
+    print(len(pdf_file_paths))
 
     with Parallel(n_jobs=NUM_JOBS) as parallel:
-        parallel([delayed(pdf_to_line_images)(pdf_path, output_dir) for pdf_path in pdf_file_paths])
+        parallel([delayed(pdf_to_line_images_hf)(pdf_path) for pdf_path in pdf_file_paths])
 
