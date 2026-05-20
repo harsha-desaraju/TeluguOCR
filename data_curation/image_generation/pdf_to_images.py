@@ -1,6 +1,7 @@
 """ Converts a PDF file into images of lines """
 
 import os
+import cv2
 import pdf2image
 import numpy as np
 import pytesseract
@@ -9,10 +10,40 @@ from PIL import Image
 from joblib import Parallel, delayed
 from datasets import Dataset, Features, Value, Image as DImage
 from huggingface_hub import login
+from deskew import determine_skew
+from skimage.transform import rotate
 from dotenv import load_dotenv
 load_dotenv()
 
 login(os.getenv("HF_TOKEN"))
+
+
+
+def preprocess_image(img: np.ndarray):
+    """Preprocess the image for OCR"""
+
+    # 1 - Convert to gray scale
+    image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # 2 - Determine and correct skew
+    angle = determine_skew(image)
+    image = rotate(image, angle, resize=True)
+    image = (image * 255).astype("uint8")
+
+    # 3 - Denoise
+    gray = cv2.GaussianBlur(image, (3, 3), 0)
+
+    # 4 - Adaptive threshold - Binarize the image
+    image = cv2.adaptiveThreshold(
+        gray,255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,15
+    )
+
+    return image
+
+
 
 
 def page_to_line_images(img: np.ndarray, min_width: int, min_height: int, max_width_percent: float, max_height_percent: float):
@@ -29,8 +60,8 @@ def page_to_line_images(img: np.ndarray, min_width: int, min_height: int, max_wi
     Returns:
         list of images of text lines meeting the criteria
     """
-
-    page_height, page_width, _ = img.shape
+    img = preprocess_image(img)
+    page_height, page_width = img.shape
 
     max_width = int(max_width_percent * page_width)
     max_height = int(max_height_percent * page_height)
@@ -48,7 +79,7 @@ def page_to_line_images(img: np.ndarray, min_width: int, min_height: int, max_wi
     line_images = []
     for i in data.index:
         line = data.loc[i]
-        l_img = img[line['top']: line['top']+line['height'], line['left']: line['left']+line['width'], :]
+        l_img = img[line['top']: line['top']+line['height'], line['left']: line['left']+line['width']]
         line_images.append(l_img)
 
     return line_images
@@ -79,44 +110,45 @@ def pdf_to_line_images(file_path: Path, out_dir: Path, first_page: int | None = 
 
 
 
-def pdf_to_line_images_hf(file_path: Path, first_page: int | None = None):
+def pdf_to_line_images_hf(file_path: Path, split: int, first_page: int | None = None):
     try:
-
         images = pdf2image.convert_from_path(str(file_path), dpi=IMAGE_DPI, first_page=first_page, thread_count=2)
-        images = [np.array(image) for image in images]
+        if images:
+            images = [np.array(image) for image in images]
 
-        file_name = file_path.stem
+            file_name = file_path.stem
 
+            first_page = first_page if first_page else 1
 
-        first_page = first_page if first_page else 1
+            # Parallelize across the pages
+            ds_buffer = []
+            with Parallel(n_jobs=NUM_JOBS) as parallel:
+                all_line_images = parallel([delayed(page_to_line_images)(image, MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH_PERCENT, MAX_HEIGHT_PERCENT) for image in images])
 
-        ds_buffer = []
-        for page_num, image in enumerate(images, first_page):
-            line_imgs = page_to_line_images(image, min_width=MIN_WIDTH, min_height=MIN_HEIGHT,
-                                            max_width_percent=MAX_WIDTH_PERCENT, max_height_percent=MAX_HEIGHT_PERCENT)
+            for page_num, line_images in enumerate(all_line_images, first_page):
+                for line_img in line_images:
+                    ds_buffer.append({
+                        "line_image": Image.fromarray(line_img),
+                        "file_name": file_name,
+                        "page_number": page_num
+                    })
 
-            for line_img in line_imgs:
-                ds_buffer.append({
-                    "line_image": Image.fromarray(line_img),
-                    "file_name": file_name,
-                    "page_number": page_num
+            # Upload to hugging face
+            ds_features = Features({
+                    "line_image": DImage(),
+                    "file_name": Value("string"),
+                    "page_number": Value("int64")
                 })
 
-        # Upload to hugging face
-        ds_features = Features({
-                "line_image": DImage(),
-                "file_name": Value("string"),
-                "page_number": Value("int64")
-            })
+            dataset = Dataset.from_list(ds_buffer, features=ds_features)
 
-        dataset = Dataset.from_list(ds_buffer, features=ds_features)
+            dataset.push_to_hub(
+                repo_id=HF_REPO_ID,
+                split=f"book_{split}",
+                commit_message=f"Uploaded {file_name}"
+            )
 
-        dataset.push_to_hub(
-            repo_id=HF_REPO_ID,
-            commit_message=f"Uploaded {file_name}"
-        )
-
-        print(f"Uploaded {file_name} to the HF hub!", flush=True)
+            print(f"Uploaded {file_name} to the HF hub!", flush=True)
 
     except Exception as e:
         print(f"The following exception occurred while processing {file_path.stem} file:\n\n{str(e)}\n\n", flush=True)
@@ -131,23 +163,18 @@ if __name__ == '__main__':
     MAX_WIDTH_PERCENT = 0.95
     MAX_HEIGHT_PERCENT = 0.05
     IMAGE_FORMAT = "jpeg"
-    MAX_FILE_SIZE_IN_MB = 40
-    NUM_JOBS = 1
+    MAX_FILE_SIZE_IN_MB = 20
+    NUM_JOBS = 8
     HF_REPO_ID = "harsha-desaraju/telugu-text-line-images"
-
-    # output_dir = Path(__file__).parents[2] / "data/images/sanatanadharm"
 
     pdfs_folder = Path(__file__).parents[2] / "data/pdf_files/free_gurukul"
     pdf_file_paths = list(Path(pdfs_folder).rglob("*.pdf"))
-
-    # # Remove files which are already done
-    # done_files = os.listdir(output_dir)
-    # pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stem not in done_files]
 
     # Limit the PDFs to files of MAX_FILE_SIZE_IN_MB size
     pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stat().st_size/1e6 < MAX_FILE_SIZE_IN_MB]
     print(len(pdf_file_paths))
 
-    with Parallel(n_jobs=NUM_JOBS) as parallel:
-        parallel([delayed(pdf_to_line_images_hf)(pdf_path) for pdf_path in pdf_file_paths])
+    # Make process across PDFs sequential due to memory limitations
+    for i, pdf_path in enumerate(pdf_file_paths):
+        pdf_to_line_images_hf(pdf_path, i+1, 6)
 
