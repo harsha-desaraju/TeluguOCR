@@ -3,6 +3,7 @@
 import os
 import gc
 import cv2
+import fitz
 import pdf2image
 import numpy as np
 import pytesseract
@@ -15,9 +16,10 @@ from deskew import determine_skew
 from skimage.transform import rotate
 from random import choice
 from dotenv import load_dotenv
-load_dotenv()
 
-login(os.getenv("HF_TOKEN"))
+import datasets
+datasets.disable_caching()
+datasets.disable_progress_bars()
 
 
 
@@ -25,7 +27,7 @@ def preprocess_image(img: np.ndarray):
     """Preprocess the image for OCR"""
 
     # 1 - Convert to gray scale
-    image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    image = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
     # 2 - Determine and correct skew
     angle = determine_skew(image)
@@ -110,82 +112,85 @@ def pdf_to_line_images(file_path: Path, out_dir: Path, first_page: int | None = 
     print(f"{file_path.stem} done!", flush=True)
 
 
+def load_page_lazy(file_path: Path, first_page: int | None = None):
+    """Load pages of the PDF lazily, one at a time"""
+    doc = fitz.open(file_path)
+    start_index = (first_page - 1) if first_page else 0
+    try:
+        for page in doc[start_index:]:
+            pix = page.get_pixmap(dpi=choice(IMAGE_DPI), colorspace=fitz.csRGB)
+            page_img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n).copy()
+            del pix
+            yield page_img
+    finally:
+        doc.close()
 
 
 def pdf_to_line_images_hf(file_path: Path, split: int, first_page: int | None = None):
     try:
-        images = pdf2image.convert_from_path(str(file_path), dpi=choice(IMAGE_DPI), first_page=first_page, thread_count=2)
-
-        if not images:
-            return
-
-        np_images = [np.array(image) for image in images]
-        del images
-        gc.collect()
-
-
         file_name = file_path.stem
-
         first_page = first_page if first_page else 1
 
-        # Parallelize across the pages
+        b_num = 1
         ds_buffer = []
-        with Parallel(n_jobs=NUM_JOBS, prefer="processes", timeout=120) as parallel:
-            all_line_images = parallel([delayed(page_to_line_images)(image, MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH_PERCENT, MAX_HEIGHT_PERCENT) for image in np_images])
-
-        del np_images
-        gc.collect()
-
-        for page_num, line_images in enumerate(all_line_images, first_page):
-            for line_img in line_images:
-                ds_buffer.append({
-                    "line_image": Image.fromarray(line_img),
-                    "file_name": file_name,
-                    "page_number": page_num
-                })
-
-        del all_line_images
-        gc.collect()
-
-        # Upload to hugging face
         ds_features = Features({
-                "line_image": DImage(),
-                "file_name": Value("string"),
-                "page_number": Value("int64")
-            })
+            "line_image": DImage(),
+            "file_name": Value("string"),
+            "page_number": Value("int64")
+        })
 
-        dataset = Dataset.from_list(ds_buffer, features=ds_features)
+        for page_num, page_image in enumerate(load_page_lazy(file_path, first_page), first_page):
+            line_images = page_to_line_images(page_image, MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH_PERCENT, MAX_HEIGHT_PERCENT)
+            ds_buffer += [
+                {"line_image": Image.fromarray(line_img), "file_name": file_name, "page_number": page_num}
+                for line_img in line_images
+            ]
+            print(f"Processing page: {page_num}, Line Images: {len(ds_buffer)}")
 
-        del ds_buffer
-        gc.collect()
+            if len(ds_buffer) >= MIN_BATCH_SIZE:
+                dataset = Dataset.from_list(ds_buffer, ds_features)
+                dataset.push_to_hub(
+                    repo_id=HF_REPO_ID,
+                    split=f"book-{split}_{b_num}",
+                    commit_message=f"Uploaded {file_name}"
+                )
+                b_num += 1
+                del ds_buffer, dataset
+                gc.collect()
+                ds_buffer = []
 
-        dataset.push_to_hub(
-            repo_id=HF_REPO_ID,
-            split=f"book_{split}",
-            commit_message=f"Uploaded {file_name}"
-        )
-
-        del dataset
-        gc.collect()
+        # Upload remaining images
+        if ds_buffer:
+            dataset = Dataset.from_list(ds_buffer, ds_features)
+            dataset.push_to_hub(
+                repo_id=HF_REPO_ID,
+                split=f"book-{split}_{b_num}",
+                commit_message=f"Uploaded {file_name}"
+            )
+            del ds_buffer, dataset
+            gc.collect()
 
         print(f"Uploaded book-{split}:{file_name} to the HF hub!", flush=True)
 
     except Exception as e:
-        print(f"The following exception occurred while processing {file_path.stem} file:\n\n{str(e)}\n\n", flush=True)
+        print(f"The following exception occurred while processing {file_path.stem}:\n\n{str(e)}\n\n", flush=True)
 
+
+IMAGE_DPI = [200, 300]
+MIN_WIDTH = 50
+MIN_HEIGHT = 10
+MAX_WIDTH_PERCENT = 0.95
+MAX_HEIGHT_PERCENT = 0.05
+IMAGE_FORMAT = "jpeg"
+MAX_FILE_SIZE_IN_MB = 20
+NUM_JOBS = 8
+HF_REPO_ID = "harsha-desaraju/telugu-text-line-images"
+MIN_BATCH_SIZE = 5000
 
 
 if __name__ == '__main__':
-
-    IMAGE_DPI = [200, 300]
-    MIN_WIDTH = 50
-    MIN_HEIGHT = 10
-    MAX_WIDTH_PERCENT = 0.95
-    MAX_HEIGHT_PERCENT = 0.05
-    IMAGE_FORMAT = "jpeg"
-    MAX_FILE_SIZE_IN_MB = 20
-    NUM_JOBS = 2
-    HF_REPO_ID = "harsha-desaraju/telugu-text-line-images"
+    load_dotenv()
+    login(os.getenv("HF_TOKEN"))
 
     pdfs_folder = Path(__file__).parents[2] / "data/pdf_files/free_gurukul"
     pdf_file_paths = list(Path(pdfs_folder).rglob("*.pdf"))
@@ -194,7 +199,6 @@ if __name__ == '__main__':
     pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stat().st_size/1e6 < MAX_FILE_SIZE_IN_MB][61:]
     print(len(pdf_file_paths))
 
-    # Make process across PDFs sequential due to memory limitations
-    for i, pdf_path in enumerate(pdf_file_paths):
-        pdf_to_line_images_hf(pdf_path, i+1, 6)
-
+    # Parallelize the process across the PDFs
+    with Parallel(n_jobs=NUM_JOBS) as parallel:
+        parallel([delayed(pdf_to_line_images_hf)(pdf_path, i+1, 6) for i, pdf_path in enumerate(pdf_file_paths, 61)])
