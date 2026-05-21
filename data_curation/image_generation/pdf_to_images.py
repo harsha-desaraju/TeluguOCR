@@ -1,6 +1,7 @@
 """ Converts a PDF file into images of lines """
 
 import os
+import gc
 import cv2
 import pdf2image
 import numpy as np
@@ -113,42 +114,60 @@ def pdf_to_line_images(file_path: Path, out_dir: Path, first_page: int | None = 
 def pdf_to_line_images_hf(file_path: Path, split: int, first_page: int | None = None):
     try:
         images = pdf2image.convert_from_path(str(file_path), dpi=IMAGE_DPI, first_page=first_page, thread_count=2)
-        if images:
-            images = [np.array(image) for image in images]
 
-            file_name = file_path.stem
+        if not images:
+            return
 
-            first_page = first_page if first_page else 1
+        np_images = [np.array(image) for image in images]
+        del images
+        gc.collect()
 
-            # Parallelize across the pages
-            ds_buffer = []
-            with Parallel(n_jobs=NUM_JOBS) as parallel:
-                all_line_images = parallel([delayed(page_to_line_images)(image, MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH_PERCENT, MAX_HEIGHT_PERCENT) for image in images])
 
-            for page_num, line_images in enumerate(all_line_images, first_page):
-                for line_img in line_images:
-                    ds_buffer.append({
-                        "line_image": Image.fromarray(line_img),
-                        "file_name": file_name,
-                        "page_number": page_num
-                    })
+        file_name = file_path.stem
 
-            # Upload to hugging face
-            ds_features = Features({
-                    "line_image": DImage(),
-                    "file_name": Value("string"),
-                    "page_number": Value("int64")
+        first_page = first_page if first_page else 1
+
+        # Parallelize across the pages
+        ds_buffer = []
+        with Parallel(n_jobs=NUM_JOBS, prefer="processes", timeout=120) as parallel:
+            all_line_images = parallel([delayed(page_to_line_images)(image, MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH_PERCENT, MAX_HEIGHT_PERCENT) for image in np_images])
+
+        del np_images
+        gc.collect()
+
+        for page_num, line_images in enumerate(all_line_images, first_page):
+            for line_img in line_images:
+                ds_buffer.append({
+                    "line_image": Image.fromarray(line_img),
+                    "file_name": file_name,
+                    "page_number": page_num
                 })
 
-            dataset = Dataset.from_list(ds_buffer, features=ds_features)
+        del all_line_images
+        gc.collect()
 
-            dataset.push_to_hub(
-                repo_id=HF_REPO_ID,
-                split=f"book_{split}",
-                commit_message=f"Uploaded {file_name}"
-            )
+        # Upload to hugging face
+        ds_features = Features({
+                "line_image": DImage(),
+                "file_name": Value("string"),
+                "page_number": Value("int64")
+            })
 
-            print(f"Uploaded {file_name} to the HF hub!", flush=True)
+        dataset = Dataset.from_list(ds_buffer, features=ds_features)
+
+        del ds_buffer
+        gc.collect()
+
+        dataset.push_to_hub(
+            repo_id=HF_REPO_ID,
+            split=f"book_{split}",
+            commit_message=f"Uploaded {file_name}"
+        )
+
+        del dataset
+        gc.collect()
+
+        print(f"Uploaded book-{split}:{file_name} to the HF hub!", flush=True)
 
     except Exception as e:
         print(f"The following exception occurred while processing {file_path.stem} file:\n\n{str(e)}\n\n", flush=True)
@@ -164,7 +183,7 @@ if __name__ == '__main__':
     MAX_HEIGHT_PERCENT = 0.05
     IMAGE_FORMAT = "jpeg"
     MAX_FILE_SIZE_IN_MB = 20
-    NUM_JOBS = 8
+    NUM_JOBS = 2
     HF_REPO_ID = "harsha-desaraju/telugu-text-line-images"
 
     pdfs_folder = Path(__file__).parents[2] / "data/pdf_files/free_gurukul"
