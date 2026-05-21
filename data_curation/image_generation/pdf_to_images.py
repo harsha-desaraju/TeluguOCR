@@ -185,7 +185,7 @@ IMAGE_FORMAT = "jpeg"
 MAX_FILE_SIZE_IN_MB = 20
 NUM_JOBS = 8
 HF_REPO_ID = "harsha-desaraju/telugu-text-line-images"
-MIN_BATCH_SIZE = 5000
+MIN_BATCH_SIZE = 10000
 
 
 if __name__ == '__main__':
@@ -196,9 +196,9 @@ if __name__ == '__main__':
     pdf_file_paths = list(Path(pdfs_folder).rglob("*.pdf"))
 
     # Limit the PDFs to files of MAX_FILE_SIZE_IN_MB size
-    pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stat().st_size/1e6 < MAX_FILE_SIZE_IN_MB][61:]
+    pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stat().st_size/1e6 < MAX_FILE_SIZE_IN_MB]
     print(len(pdf_file_paths))
 
     # Parallelize the process across the PDFs
     with Parallel(n_jobs=NUM_JOBS) as parallel:
-        parallel([delayed(pdf_to_line_images_hf)(pdf_path, i+1, 6) for i, pdf_path in enumerate(pdf_file_paths, 61)])
+        parallel([delayed(pdf_to_line_images_hf)(pdf_path, i+1, 6) for i, pdf_path in enumerate(pdf_file_paths, 0)])
