@@ -13,6 +13,7 @@ from datasets import Dataset, Features, Value, Image as DImage
 from huggingface_hub import login
 from deskew import determine_skew
 from skimage.transform import rotate
+from random import choice
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -89,7 +90,7 @@ def page_to_line_images(img: np.ndarray, min_width: int, min_height: int, max_wi
 
 def pdf_to_line_images(file_path: Path, out_dir: Path, first_page: int | None = None):
 
-    images = pdf2image.convert_from_path(str(file_path), dpi=IMAGE_DPI, first_page=first_page, thread_count=1)
+    images = pdf2image.convert_from_path(str(file_path), dpi=IMAGE_DPI[-1], first_page=first_page, thread_count=1)
     images = [np.array(image) for image in images]
 
     # Save
@@ -113,7 +114,7 @@ def pdf_to_line_images(file_path: Path, out_dir: Path, first_page: int | None = 
 
 def pdf_to_line_images_hf(file_path: Path, split: int, first_page: int | None = None):
     try:
-        images = pdf2image.convert_from_path(str(file_path), dpi=IMAGE_DPI, first_page=first_page, thread_count=2)
+        images = pdf2image.convert_from_path(str(file_path), dpi=choice(IMAGE_DPI), first_page=first_page, thread_count=2)
 
         if not images:
             return
@@ -176,7 +177,7 @@ def pdf_to_line_images_hf(file_path: Path, split: int, first_page: int | None = 
 
 if __name__ == '__main__':
 
-    IMAGE_DPI = 300
+    IMAGE_DPI = [200, 300]
     MIN_WIDTH = 50
     MIN_HEIGHT = 10
     MAX_WIDTH_PERCENT = 0.95
@@ -190,7 +191,7 @@ if __name__ == '__main__':
     pdf_file_paths = list(Path(pdfs_folder).rglob("*.pdf"))
 
     # Limit the PDFs to files of MAX_FILE_SIZE_IN_MB size
-    pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stat().st_size/1e6 < MAX_FILE_SIZE_IN_MB]
+    pdf_file_paths = [pdf_path for pdf_path in pdf_file_paths if pdf_path.stat().st_size/1e6 < MAX_FILE_SIZE_IN_MB][61:]
     print(len(pdf_file_paths))
 
     # Make process across PDFs sequential due to memory limitations
