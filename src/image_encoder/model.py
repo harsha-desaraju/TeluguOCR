@@ -7,7 +7,7 @@ import torch.nn as nn
 from torchvision import transforms
 from PIL import Image
 from dataclasses import dataclass
-
+from utils import random_masking, patchify, get_2d_sinusoidal_encoding
 
 @dataclass
 class ViTConfig:
@@ -26,7 +26,7 @@ class ViTConfig:
 class TransformerBlock(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, hidden_layer_size: int, dropout: float):
         super().__init__()
-        self.multi_head_attention = nn.MultiheadAttention(embed_dim, num_heads, dropout, batch_first=True)
+        self.multi_head_attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim, hidden_layer_size),
             nn.SiLU(),
@@ -55,34 +55,113 @@ class ViTEncoder(nn.Module):
         super().__init__()
         ctx_len = (vit_config.image_height//vit_config.patch_size) * (vit_config.max_image_width//vit_config.patch_size)
         self.image_embedding = nn.Conv2d(in_channels=1, out_channels=vit_config.embed_dim, kernel_size=vit_config.patch_size, stride=vit_config.patch_size)
-        self.positional_encoding = nn.Embedding(ctx_len, vit_config.embed_dim)
+
+        enc = get_2d_sinusoidal_encoding(
+            vit_config.image_height // vit_config.patch_size,
+            vit_config.max_image_width // vit_config.patch_size,
+            vit_config.embed_dim
+        )
+        self.register_buffer("positional_encoding", enc)
+
         self.transformer_blocks = nn.Sequential(
             *[TransformerBlock(vit_config.embed_dim, vit_config.num_heads, vit_config.hidden_layer_size, vit_config.dropout)
               for _ in range(vit_config.num_blocks)]
         )
         self.layer_norm = nn.LayerNorm(vit_config.embed_dim)
-        self.register_buffer("positions", torch.arange(ctx_len))
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, mask_ratio: float | None = None):
         # x -> B, C, H, W
         embeds = self.image_embedding(x)
-        embeds = embeds.flatten(2)
-        embeds = embeds.transpose(1, 2)
-        pos_encodings = self.positional_encoding(self.positions[:embeds.shape[1]])
+        embeds = embeds.flatten(2).transpose(1, 2)
+        pos_encodings = self.positional_encoding[:embeds.shape[1]]
         embeds = embeds + pos_encodings
+
+        if mask_ratio is not None:
+            embeds, mask, restore_ids = random_masking(embeds, mask_ratio)
+        else:
+            mask, restore_ids = None, None
+
         ctx_embeds = self.transformer_blocks(embeds)
         ctx_embeds = self.layer_norm(ctx_embeds)
-        return ctx_embeds
+        return ctx_embeds, mask, restore_ids
 
 
-# Creating the patches of the input image
-# Masking the tokens of the patched input
-# Adding back the masked tokens
-# Creating the decoder
+
+
+class ViTDecoder(nn.Module):
+    def __init__(self, config: ViTConfig, encoder_dim: int):
+        super().__init__()
+        ctx_len = (config.image_height // config.patch_size) * (
+                    config.max_image_width // config.patch_size)
+        self.embedding_layer = nn.Linear(encoder_dim, config.embed_dim)
+
+        enc = get_2d_sinusoidal_encoding(
+            config.image_height // config.patch_size,
+            config.max_image_width // config.patch_size,
+            config.embed_dim
+        )
+        self.register_buffer("positional_encoding", enc)
+
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, config.embed_dim))
+
+        self.transformer_blocks = nn.Sequential(*[
+            TransformerBlock(config.embed_dim, config.num_heads, config.hidden_layer_size, config.dropout)
+            for _ in range(config.num_blocks)
+        ])
+        self.decoder_norm = nn.LayerNorm(config.embed_dim)
+
+        self.output_projection = nn.Linear(config.embed_dim, config.patch_size * config.patch_size)
+
+
+    def forward(self, latent: torch.Tensor, restore_ids: torch.Tensor):
+        x = self.embedding_layer(latent)
+
+        B, L, D = x.shape
+        N = restore_ids.shape[1]
+
+        mask_tokens = self.mask_token.repeat(B, N-L, 1)
+
+        _x = torch.cat([x, mask_tokens], dim=1)
+        _x = torch.gather(
+            _x, dim=1,
+            index=restore_ids.unsqueeze(-1).repeat(1, 1, D)
+        )
+        _x = _x + self.positional_encoding[:N]
+        _x = self.transformer_blocks(_x)
+        _x = self.decoder_norm(_x)
+        proj = self.output_projection(_x)
+        return proj
+
+
+
+
+class MaskedAutoEncoder(nn.Module):
+    def __init__(self, encoder_config: ViTConfig, decoder_config: ViTConfig, mask_ratio: float):
+        super().__init__()
+
+        self.mask_ratio = mask_ratio
+        self.patch_size = encoder_config.patch_size
+        self.encoder_model = ViTEncoder(encoder_config)
+        self.decoder_model = ViTDecoder(decoder_config, encoder_config.embed_dim)
+
+
+    def forward(self, images: torch.Tensor):
+        latent, mask, restore_ids = self.encoder_model(images, self.mask_ratio)
+
+        pred = self.decoder_model(latent, restore_ids)
+
+        target = patchify(images, self.patch_size)
+
+        loss = ((target - pred)**2).mean(dim=-1)
+        loss = (loss * mask).sum() / mask.sum()
+
+        return loss
+
+
+
 # Thinking and changing the Positional encoding function - Change this
 # Think of patch_size of 8
 # Use high mask ratio
-# Think of quantization aware training
 
 
 
@@ -154,7 +233,13 @@ if __name__ == '__main__':
     transformed_img = transformed_img.unsqueeze(1)
     print(transformed_img.shape)
 
+    auto_encoder = MaskedAutoEncoder(
+        encoder_config=ViTConfig(),
+        decoder_config=ViTConfig(),
+        mask_ratio=0.75
+    )
 
-    encoder_model = ViTEncoder(ViTConfig())
-    out = encoder_model(transformed_img)
-    print(out.shape)
+    loss = auto_encoder(transformed_img)
+    print(loss)
+
+
