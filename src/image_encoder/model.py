@@ -4,7 +4,7 @@ Vision Transformer based Image Encoder model
 
 import torch
 import torch.nn as nn
-from torchvision import transforms
+from utils import ImagePreprocessor
 from PIL import Image
 from dataclasses import dataclass
 from utils import random_masking, patchify, get_2d_sinusoidal_encoding
@@ -174,54 +174,6 @@ class MaskedAutoEncoder(nn.Module):
 
         return {"loss": loss, "logits": pred}
 
-
-
-
-class ImagePreprocessor:
-    """
-    Preprocesses the image before encoding the image
-    1) Change the image to gray scale
-    2) Resize the image
-    3) Pad the image to the nearest multiple of patch size
-    4) Normalize the image
-    """
-    def __init__(self, image_height: int, max_image_width: int, patch_size: int):
-        assert image_height % patch_size == 0, "Image height should be a multiple of patch size"
-        self.image_height = image_height
-        self.max_image_width = max_image_width
-        self.patch_size = patch_size
-        self.to_tensor = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
-        ])
-
-    def _transform(self, img: Image.Image) -> torch.Tensor:
-        # Convert to GrayScale
-        img = img.convert('L')
-
-        # Calculate the resize target for the image while preserving the aspect ratio
-        img_w, img_h = img.size
-        scale_factor = self.image_height/img_h
-        if scale_factor * img_w > self.max_image_width:
-            scale_factor = self.max_image_width/img_w
-            target_size = (int(scale_factor * img_h), self.max_image_width)
-            diff = self.image_height - target_size[0]
-            pad_t, pad_b = diff//2, diff - diff//2
-            pad_l, pad_r = 0, 0
-        else:
-            target_size = (self.image_height, int(scale_factor*img_w))
-            # Find the nearest multiple of patch size for padding
-            diff = (-target_size[1]) % self.patch_size
-            pad_l, pad_r = 0, diff
-            pad_t, pad_b = 0, 0
-
-        img = transforms.Resize(target_size)(img)
-        img = transforms.Pad((pad_l, pad_t, pad_r, pad_b), fill=255)(img)
-
-        return self.to_tensor(img)
-
-    def __call__(self, img: Image.Image) -> torch.Tensor:
-        return self._transform(img)
 
 
 
