@@ -27,7 +27,7 @@ def random_masking(x, mask_ratio):
 
     mask = torch.gather(mask, dim=1, index=ids_restore)
 
-    return x_masked, mask, ids_restore
+    return x_masked, mask, ids_restore, ids_keep
 
 
 
@@ -81,7 +81,7 @@ def get_2d_sinusoidal_encoding(h_patches, w_patches, embed_dim):
     w_enc = w_enc.unsqueeze(0).repeat(h_patches, 1, 1)  # H, W, D/2
 
     encoding = torch.cat([h_enc, w_enc], dim=-1)         # H, W, D
-    return encoding.view(h_patches * w_patches, embed_dim)  # N, D
+    return encoding.view(h_patches, w_patches, embed_dim)  # N, D
 
 
 

@@ -74,19 +74,20 @@ class ViTEncoder(nn.Module):
     def forward(self, x: torch.Tensor, padding_mask: torch.Tensor, mask_ratio: float | None = None):
         # x -> B, C, H, W
         embeds = self.image_embedding(x)
+        B, D, hp, wp = embeds.shape
         embeds = embeds.flatten(2).transpose(1, 2)
-        pos_encodings = self.positional_encoding[:embeds.shape[1]]
+        pos_encodings = self.positional_encoding[:hp, :wp, :].reshape(hp*wp, D)
         embeds = embeds + pos_encodings
 
         if mask_ratio is not None:
-            embeds, mask, restore_ids = random_masking(embeds, mask_ratio)
+            embeds, mask, restore_ids, ids_keep = random_masking(embeds, mask_ratio)
         else:
-            mask, restore_ids = None, None
+            mask, restore_ids, ids_keep = None, None, None
 
-        if restore_ids is not None:
+        if ids_keep is not None:
             visible_padding_mask = torch.gather(
                 padding_mask, dim=1,
-                index=restore_ids[:, :embeds.shape[1]]
+                index=ids_keep
             )
         else:
             visible_padding_mask = padding_mask
@@ -108,6 +109,7 @@ class ViTDecoder(nn.Module):
         super().__init__()
         self.embedding_layer = nn.Linear(encoder_dim, config.embed_dim)
 
+        self.h_full = config.image_height // config.patch_size
         enc = get_2d_sinusoidal_encoding(
             config.image_height // config.patch_size,
             config.max_image_width // config.patch_size,
@@ -139,7 +141,8 @@ class ViTDecoder(nn.Module):
             _x, dim=1,
             index=restore_ids.unsqueeze(-1).repeat(1, 1, D)
         )
-        _x = _x + self.positional_encoding[:N]
+        wp = N // self.h_full
+        _x = _x + self.positional_encoding[:, wp ,:].reshape(N, D)
         for block in self.transformer_blocks:
             _x = block(_x, padding_mask.bool())
         _x = self.decoder_norm(_x)
@@ -159,16 +162,16 @@ class MaskedAutoEncoder(nn.Module):
         self.decoder_model = ViTDecoder(decoder_config, encoder_config.embed_dim)
 
 
-    def forward(self, images: torch.Tensor, padding_mask: torch.Tensor):
-        latent, mask, restore_ids = self.encoder_model(images, padding_mask,  self.mask_ratio)
+    def forward(self, images: torch.Tensor, padding_masks: torch.Tensor):
+        latent, mask, restore_ids = self.encoder_model(images, padding_masks,  self.mask_ratio)
 
-        pred = self.decoder_model(latent, restore_ids, padding_mask)
+        pred = self.decoder_model(latent, restore_ids, padding_masks)
 
         target = patchify(images, self.patch_size)
 
         loss = ((target - pred)**2).mean(dim=-1)
 
-        valid_patch_mask = (~padding_mask.bool()).float()
+        valid_patch_mask = (~padding_masks.bool()).float()
         effective_mask = mask * valid_patch_mask
         loss = (loss * effective_mask).sum() / effective_mask.sum()
 
