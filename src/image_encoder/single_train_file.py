@@ -355,7 +355,7 @@ def find_last_checkpoint():
 
 
 if __name__ == '__main__':
-    BATCH_SIZE = 64
+    BATCH_SIZE = 256
     EPOCHS = 50
     TEST_SIZE = 0.05
 
@@ -366,6 +366,7 @@ if __name__ == '__main__':
 
     # New checkpoints are written here (writable on Kaggle).
     OUTPUT_DIR = "/kaggle/working/telugu-vitmae"
+    # OUTPUT_DIR = "/Users/xai/Personal/Projects/TeluguOCR/src/image_encoder/telugu-vitmae"
 
     # A previous session's output, added as a Kaggle Dataset / notebook-output input.
     # Read-only. Leave as None for the very first run.
@@ -437,14 +438,16 @@ if __name__ == '__main__':
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=1,  # raise to grow effective batch on T4
+        gradient_accumulation_steps=4,  # raise to grow effective batch on T4
+        optim="adamw_torch_fused",
+        torch_compile=True,
         learning_rate=1e-4,
         num_train_epochs=EPOCHS,  # keep IDENTICAL across resumes
         weight_decay=0.05,
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
         adam_beta2=0.95,
-        max_steps=20000, #   ---------------- ????????????
+        # max_steps=20000, #   ---------------- ????????????
         group_by_length=True,
         length_column_name="image_width",
         eval_strategy="steps",  # renamed from evaluation_strategy
@@ -454,8 +457,11 @@ if __name__ == '__main__':
         save_total_limit=2,  # keep storage under the ~20 GB cap
         logging_steps=50,
         remove_unused_columns=False,
+        ddp_find_unused_parameters=False,
         fp16=torch.cuda.is_available(),  # T4 = fp16 (no bf16 on Turing)
-        dataloader_num_workers=2,
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
+        dataloader_prefetch_factor=2,
         report_to="none",
     )
 
