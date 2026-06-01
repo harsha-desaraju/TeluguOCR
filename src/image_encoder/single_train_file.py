@@ -360,7 +360,7 @@ def find_last_checkpoint():
 
 
 if __name__ == '__main__':
-    BATCH_SIZE = 256
+    BATCH_SIZE = 512
     EPOCHS = 50
     TEST_SIZE = 0.05
 
@@ -381,7 +381,7 @@ if __name__ == '__main__':
     # Load and Prepare the datasets
 
     ds = load_dataset(
-        "harsha-desaraju/telugu-book-line-images-sample",
+        "harsha-desaraju/telugu-book-line-images-v2",
         columns=['line_image', 'image_width'],
         # download_mode="force_redownload"
     )["train"]
@@ -466,7 +466,7 @@ if __name__ == '__main__':
         save_strategy="steps",
         save_steps=2000,  # checkpoint often — sessions can be cut
         save_total_limit=2,  # keep storage under the ~20 GB cap
-        logging_steps=50,
+        logging_steps=100,
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
         fp16=torch.cuda.is_available(),  # T4 = fp16 (no bf16 on Turing)
