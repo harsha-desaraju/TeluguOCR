@@ -440,8 +440,7 @@ if __name__ == '__main__':
         per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=4,  # raise to grow effective batch on T4
         optim="adamw_torch_fused",
-        torch_compile=True,
-        learning_rate=1e-4,
+        learning_rate=(1e-4*BATCH_SIZE/256),
         num_train_epochs=EPOCHS,  # keep IDENTICAL across resumes
         weight_decay=0.05,
         warmup_ratio=0.05,
@@ -459,9 +458,10 @@ if __name__ == '__main__':
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
         fp16=torch.cuda.is_available(),  # T4 = fp16 (no bf16 on Turing)
-        dataloader_num_workers=4,
+        dataloader_num_workers=2,
         dataloader_pin_memory=True,
-        dataloader_prefetch_factor=2,
+        dataloader_prefetch_factor=4,
+        dataloader_persistent_workers=True,
         report_to="none",
     )
 
