@@ -373,7 +373,7 @@ if __name__ == '__main__':
 
     ds = load_dataset(
         "harsha-desaraju/telugu-book-line-images-sample",
-        columns=['line_image']
+        columns=['line_image', 'image_width']
     )["train"]
 
     split_dataset = ds.train_test_split(test_size=TEST_SIZE, seed=42)
@@ -386,11 +386,11 @@ if __name__ == '__main__':
 
     preprocessor = ImagePreprocessor(IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PATCH_SIZE)
 
-    train_ds = train_ds.map(process_sample)
-    test_ds = test_ds.map(process_sample)
-
     train_ds = train_ds.with_format("torch", columns=["line_image"], output_all_columns=True)
     test_ds = test_ds.with_format("torch", columns=["line_image"], output_all_columns=True)
+
+    train_ds = train_ds.with_transform(preprocessor)
+    test_ds = test_ds.with_transform(preprocessor)
 
     # Initialize the models
 
