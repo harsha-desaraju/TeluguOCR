@@ -360,7 +360,7 @@ def find_last_checkpoint():
 
 
 if __name__ == '__main__':
-    BATCH_SIZE = 512
+    BATCH_SIZE = 256
     EPOCHS = 50
     TEST_SIZE = 0.05
 
