@@ -130,7 +130,7 @@ class ImagePreprocessor:
 
     def __call__(self, sample: dict) -> dict:
         return {
-            "line_image": [self._transform(sample['line_image'][0])],
+            "line_image": self._transform(sample['line_image']),
             "image_width": sample["image_width"]
         }
 
@@ -377,7 +377,8 @@ if __name__ == '__main__':
 
     ds = load_dataset(
         "harsha-desaraju/telugu-book-line-images-sample",
-        columns=['line_image', 'image_width']
+        columns=['line_image', 'image_width'],
+        # download_mode="force_redownload"
     )["train"]
 
     split_dataset = ds.train_test_split(test_size=TEST_SIZE, seed=42)
@@ -390,8 +391,14 @@ if __name__ == '__main__':
 
     preprocessor = ImagePreprocessor(IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PATCH_SIZE)
 
-    train_ds = train_ds.with_transform(preprocessor)
-    test_ds = test_ds.with_transform(preprocessor)
+    train_ds = train_ds.map(preprocessor)
+    test_ds = test_ds.map(preprocessor)
+
+    train_ds = train_ds.with_format("torch", columns=['line_image'], output_all_columns=True)
+    test_ds = test_ds.with_format("torch", columns=['line_image'], output_all_columns=True)
+
+    # train_ds = train_ds.with_transform(preprocessor)
+    # test_ds = test_ds.with_transform(preprocessor)
 
     # Initialize the models
 
