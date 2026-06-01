@@ -1,7 +1,7 @@
 import os
 import gc
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from transformers import Trainer, TrainingArguments
 from PIL import Image
 from torchvision import transforms
@@ -380,11 +380,13 @@ if __name__ == '__main__':
 
     # Load and Prepare the datasets
 
-    ds = load_dataset(
-        "harsha-desaraju/telugu-book-line-images-v2",
-        columns=['line_image', 'image_width'],
-        # download_mode="force_redownload"
-    )["train"]
+    configs = ["set_1", "set_2", "set_3", "set_4", "set_5"]
+    ds = []
+    for config in configs:
+        tds = load_dataset("harsha-desaraju/telugu-book-line-images-v2", config, split="train",
+                           columns=['line_image', 'image_width'])
+        ds.append(tds)
+    ds = concatenate_datasets(ds)
 
     split_dataset = ds.train_test_split(test_size=TEST_SIZE, seed=42)
 
