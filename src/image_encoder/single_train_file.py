@@ -129,10 +129,15 @@ class ImagePreprocessor:
         return self.to_tensor(img)
 
     def __call__(self, sample: dict) -> dict:
+        # return {
+        #     "line_image": self._transform(sample['line_image']),
+        #     "image_width": sample["image_width"]
+        # }
         return {
-            "line_image": self._transform(sample['line_image']),
+            "line_image": [self._transform(sample['line_image'][0])],
             "image_width": sample["image_width"]
         }
+
 
 
 @dataclass
@@ -391,14 +396,14 @@ if __name__ == '__main__':
 
     preprocessor = ImagePreprocessor(IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PATCH_SIZE)
 
-    train_ds = train_ds.map(preprocessor)
-    test_ds = test_ds.map(preprocessor)
+    # train_ds = train_ds.map(preprocessor)
+    # test_ds = test_ds.map(preprocessor)
 
     train_ds = train_ds.with_format("torch", columns=['line_image'], output_all_columns=True)
     test_ds = test_ds.with_format("torch", columns=['line_image'], output_all_columns=True)
 
-    # train_ds = train_ds.with_transform(preprocessor)
-    # test_ds = test_ds.with_transform(preprocessor)
+    train_ds = train_ds.with_transform(preprocessor)
+    test_ds = test_ds.with_transform(preprocessor)
 
     # Initialize the models
 
