@@ -445,7 +445,7 @@ if __name__ == '__main__':
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=4,  # raise to grow effective batch on T4
+        gradient_accumulation_steps=1,  # raise to grow effective batch on T4
         optim="adamw_torch_fused",
         learning_rate=(1e-4*BATCH_SIZE/256),
         num_train_epochs=EPOCHS,  # keep IDENTICAL across resumes
