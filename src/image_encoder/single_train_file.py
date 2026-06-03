@@ -1,5 +1,4 @@
 import os
-import gc
 import torch
 from datasets import load_dataset, concatenate_datasets
 from transformers import Trainer, TrainingArguments
@@ -8,6 +7,7 @@ from torchvision import transforms
 import torch.nn as nn
 from dataclasses import dataclass
 from transformers.trainer_utils import get_last_checkpoint
+from torch.utils.data import DataLoader, DistributedSampler
 
 
 def random_masking(x, mask_ratio):
@@ -359,9 +359,39 @@ def find_last_checkpoint():
     return None
 
 
+class SequentialDistributedTrainer(Trainer):
+    def get_train_dataloader(self) -> DataLoader:
+
+        if self.args.world_size > 1:
+            print(f"Using Sequential Distributed Sampler in GPU: {self.args.process_index}")
+            # Multi-GPU: use DistributedSampler with shuffle=False
+            sampler = DistributedSampler(
+                self.train_dataset,
+                num_replicas=self.args.world_size,
+                rank=self.args.process_index,
+                shuffle=False,
+                drop_last=self.args.dataloader_drop_last,
+            )
+        else:
+            # Single GPU fallback
+            print("Using Sequential Sampler")
+            from torch.utils.data import SequentialSampler
+            sampler = SequentialSampler(self.train_dataset)
+
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            sampler=sampler,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
+
+
 if __name__ == '__main__':
-    BATCH_SIZE = 256
-    EPOCHS = 50
+    BATCH_SIZE = 1024
+    EPOCHS = 80
     TEST_SIZE = 0.05
 
     IMAGE_HEIGHT = 64
@@ -383,18 +413,23 @@ if __name__ == '__main__':
     configs = ["set_1", "set_2", "set_3", "set_4", "set_5"]
     ds = []
     for config in configs:
-        tds = load_dataset("harsha-desaraju/telugu-book-line-images-v2", config, split="train",
+        tds = load_dataset("harsha-desaraju/telugu-book-line-images-sorted", config, split="train",
                            columns=['line_image', 'image_width'])
         ds.append(tds)
     ds = concatenate_datasets(ds)
 
-    split_dataset = ds.train_test_split(test_size=TEST_SIZE, seed=42)
+    # ds = load_dataset(
+    #     "harsha-desaraju/telugu-book-line-images-sample",
+    #     columns=['line_image', 'image_width']
+    # )["train"]
 
-    train_ds = split_dataset["train"]
-    test_ds = split_dataset["test"]
+    # Remove sampling to remove randomness in sample order
+    # split_dataset = ds.train_test_split(test_size=TEST_SIZE, seed=42)
 
-    del split_dataset
-    gc.collect()
+    num_test_samples = int(len(ds) * TEST_SIZE)
+
+    test_ds = ds.select(range(len(ds) - num_test_samples, len(ds)))
+    train_ds = ds.select(range(len(ds) - num_test_samples))
 
     preprocessor = ImagePreprocessor(IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PATCH_SIZE)
 
@@ -443,7 +478,6 @@ if __name__ == '__main__':
 
     print(f"No. of parameters in the decoder model: {num_params}")
 
-
     # Define the trainer and train the model
     last_checkpoint = find_last_checkpoint()
     print(f"Resuming from: {last_checkpoint}" if last_checkpoint else "No checkpoint — starting fresh.")
@@ -454,15 +488,15 @@ if __name__ == '__main__':
         per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=1,  # raise to grow effective batch on T4
         optim="adamw_torch_fused",
-        learning_rate=(1e-4*BATCH_SIZE/256),
+        learning_rate=(1e-4 * BATCH_SIZE / 256),
         num_train_epochs=EPOCHS,  # keep IDENTICAL across resumes
         weight_decay=0.05,
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
         adam_beta2=0.95,
         # max_steps=20000, #   ---------------- ????????????
-        group_by_length=True,
-        length_column_name="image_width",
+        # group_by_length=True,
+        # length_column_name="image_width",
         eval_strategy="steps",  # renamed from evaluation_strategy
         eval_steps=2000,
         save_strategy="steps",
@@ -472,18 +506,19 @@ if __name__ == '__main__':
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
         fp16=torch.cuda.is_available(),  # T4 = fp16 (no bf16 on Turing)
-        dataloader_num_workers=2,
+        dataloader_num_workers=4,
         dataloader_pin_memory=True,
         dataloader_prefetch_factor=4,
         dataloader_persistent_workers=True,
-        report_to="none",
+        report_to="wandb",
+        run_name="vit-training"
     )
 
 
     # # Add the image_width column to the dataset in hugging face.
     # # Do the preprocessing using `with_transform` instead of map to save a lot of upfront time
 
-    trainer = Trainer(
+    trainer = SequentialDistributedTrainer(
         model=mae_model,
         args=training_args,
         train_dataset=train_ds,
