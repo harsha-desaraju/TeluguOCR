@@ -51,7 +51,7 @@ def get_top_common(tel, san, top):
 
 if __name__ == '__main__':
 
-    VOCAB = 2048
+    VOCAB = 2043      # Leave some space for special tokens like EOS, PAD etc
 
     with open("token_dist/english_grapheme_dist.json", 'r') as f:
         eng_dist = json.load(f)
@@ -139,6 +139,10 @@ if __name__ == '__main__':
         if grapheme_vocab[i] not in finalized_vocab:
             finalized_vocab.append(grapheme_vocab[i])
         i += 1
+
+    with open("grapheme_list.txt", 'w') as f:
+        for grapheme in finalized_vocab:
+            f.write(repr(grapheme)+'\n')
 
     print(finalized_vocab)
 
