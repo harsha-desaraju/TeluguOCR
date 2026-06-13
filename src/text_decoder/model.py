@@ -125,8 +125,17 @@ class GPTModel(nn.Module):
 
 if __name__ == '__main__':
 
-    model = GPTModel(GPTConfig())
-    print(model)
+    model_config = GPTConfig(
+        vocab_size=2048,
+        embed_dim=512,
+        hidden_dim=1368,  # 2.67 * 512 = 2/3 * 4 * hidden_dim
+        num_heads=8,
+        num_layers=24,
+        ctx_len=1024,
+        dropout=0.1
+    )
+
+    model = GPTModel(model_config)
 
     inp = torch.randint(0, 2048, (4, 10))
 
