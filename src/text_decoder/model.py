@@ -27,13 +27,24 @@ def calculate_positional_encodings(positions: torch.Tensor, embed_dim: int):
     return enc
 
 
+class SwiGLU(nn.Module):
+    """Implement the SwiGLU activation function"""
+    def __init__(self, embed_dim: int, hidden_dim: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(embed_dim, hidden_dim, bias=False)
+        self.up_proj = nn.Linear(embed_dim, hidden_dim, bias=False)
+        self.down_proj = nn.Linear(hidden_dim, embed_dim, bias=False)
+
+    def forward(self, x):
+        return self.down_proj(nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
 class GPTTransformerBlock(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.attention_layer = nn.MultiheadAttention(config.embed_dim, config.num_heads, batch_first=True)
         self.mlp = nn.Sequential(
             nn.Linear(config.embed_dim, config.hidden_dim),
-            nn.ReLU(),
+            SwiGLU(config.embed_dim, config.hidden_dim),
             nn.Linear(config.hidden_dim, config.embed_dim)
         )
         self.layer_norm1 = nn.LayerNorm(config.embed_dim)
@@ -63,6 +74,7 @@ class GPTModel(nn.Module):
             GPTTransformerBlock(config) for _ in range(config.num_layers)
         ])
         self.lm_head = nn.Linear(config.embed_dim, config.vocab_size)
+        self.lm_head.weight = self.embedding_layer.weight
 
     def forward(self, x):
         # x -> B, T, D
