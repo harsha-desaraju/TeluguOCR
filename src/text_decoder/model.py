@@ -44,7 +44,7 @@ class GPTTransformerBlock(nn.Module):
         self.attention_layer = nn.MultiheadAttention(config.embed_dim, config.num_heads, batch_first=True)
         self.mlp = nn.Sequential(
             nn.Linear(config.embed_dim, config.hidden_dim),
-            SwiGLU(config.embed_dim, config.hidden_dim),
+            SwiGLU(config.hidden_dim, 2 * config.hidden_dim),
             nn.Linear(config.hidden_dim, config.embed_dim)
         )
         self.layer_norm1 = nn.LayerNorm(config.embed_dim)
