@@ -14,6 +14,7 @@ class GPTConfig:
     num_heads: int = 8
     num_layers: int = 12
     ctx_len: int = 1024
+    dropout: float = 0.1
 
 
 def calculate_positional_encodings(positions: torch.Tensor, embed_dim: int):
@@ -41,11 +42,12 @@ class SwiGLU(nn.Module):
 class GPTTransformerBlock(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.attention_layer = nn.MultiheadAttention(config.embed_dim, config.num_heads, batch_first=True)
+        self.attention_layer = nn.MultiheadAttention(config.embed_dim, config.num_heads, dropout=config.dropout, batch_first=True)
         self.mlp = nn.Sequential(
             nn.Linear(config.embed_dim, config.hidden_dim),
             SwiGLU(config.hidden_dim, 2 * config.hidden_dim),
-            nn.Linear(config.hidden_dim, config.embed_dim)
+            nn.Linear(config.hidden_dim, config.embed_dim),
+            nn.Dropout(config.dropout)
         )
         self.layer_norm1 = nn.LayerNorm(config.embed_dim)
         self.layer_norm2 = nn.LayerNorm(config.embed_dim)
