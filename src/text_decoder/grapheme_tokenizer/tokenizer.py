@@ -34,17 +34,6 @@ import regex
 from transformers import PreTrainedTokenizer
 
 
-# ---------------------------------------------------------------------------
-# Special tokens
-# ---------------------------------------------------------------------------
-PAD_TOKEN   = "[PAD]"
-UNK_TOKEN   = "[UNK]"
-BOS_TOKEN   = "[BOS]"
-EOS_TOKEN   = "[EOS]"
-MASK_TOKEN  = "[MASK]"
-
-SPECIAL_TOKENS_LIST = [PAD_TOKEN, UNK_TOKEN, BOS_TOKEN, EOS_TOKEN, MASK_TOKEN]
-
 
 class TeluguGraphemeTokenizer(PreTrainedTokenizer):
     """HuggingFace-compatible grapheme-cluster tokenizer for Telugu.
@@ -69,11 +58,11 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
             vocab_list: Optional[list[str]] = None,
             add_bos_token: bool = True,
             add_eos_token: bool = True,
-            pad_token: str = PAD_TOKEN,
-            unk_token: str = UNK_TOKEN,
-            bos_token: str = BOS_TOKEN,
-            eos_token: str = EOS_TOKEN,
-            mask_token: str = MASK_TOKEN,
+            pad_token: str = "[PAD]",
+            unk_token: str = "[UNK]",
+            bos_token: str = "[BOS]",
+            eos_token: str = "[EOS]",
+            mask_token: str = "[MASK]",
             **kwargs,
     ):
         vocab = {}
@@ -89,7 +78,9 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
         if not vocab:
             raise AssertionError("Either `vocab_file` or `vocab_list` has to be given.")
 
-        for tok in SPECIAL_TOKENS_LIST:
+        self.SPECIAL_TOKENS_LIST = [pad_token, unk_token, bos_token, eos_token, mask_token]
+
+        for tok in self.SPECIAL_TOKENS_LIST:
             if tok not in vocab:
                 vocab[tok] = len(vocab)
 
@@ -97,6 +88,7 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
         self._inv_vocab = {v: k for k, v in vocab.items()}
         self.add_bos_token = add_bos_token
         self.add_eos_token = add_eos_token
+        self.UNK = unk_token
 
         super().__init__(
             pad_token=pad_token,
@@ -129,13 +121,13 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
         return tokens
 
     def _convert_token_to_id(self, token: str) -> int:
-        return self.vocab.get(token, self.vocab.get(UNK_TOKEN, 1))
+        return self.vocab.get(token, self.vocab.get(self.UNK, 1))
 
     def _convert_id_to_token(self, index: int) -> str:
-        return self._inv_vocab.get(index, UNK_TOKEN)
+        return self._inv_vocab.get(index, self.UNK)
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
-        cleaned = [t for t in tokens if t not in SPECIAL_TOKENS_LIST]
+        cleaned = [t for t in tokens if t not in self.SPECIAL_TOKENS_LIST]
         return "".join(cleaned)
 
     def build_inputs_with_special_tokens(self, token_ids_0, token_ids_1=None):
@@ -193,11 +185,11 @@ if __name__ == "__main__":
     tokenizer = TeluguGraphemeTokenizer(vocab_list=vocab_list)
 
     for sample in samples:
-        tokens = tokenizer.encode(sample, add_special_tokens=True)
-        decoded_text = tokenizer.decode(tokens, skip_special_tokens=False)
+        tokens = tokenizer(sample, add_special_tokens=True)
+        decoded_text = tokenizer.decode(tokens['input_ids'], skip_special_tokens=False)
         print(tokens)
         print(decoded_text)
         print('='*50)
 
 
-    tokenizer.save_vocabulary("./", filename_prefix="telugu")
+    # tokenizer.save_vocabulary("./", filename_prefix="telugu")
