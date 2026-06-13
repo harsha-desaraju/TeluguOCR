@@ -4,6 +4,7 @@ Build a GPT style model
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from dataclasses import dataclass
 
 @dataclass
@@ -37,31 +38,59 @@ class SwiGLU(nn.Module):
         self.down_proj = nn.Linear(hidden_dim, embed_dim, bias=False)
 
     def forward(self, x):
-        return self.down_proj(nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+class MultiHeadAttention(nn.Module):
+    """Implement multi head attention"""
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float, is_causal: bool):
+        super().__init__()
+        assert embed_dim % num_heads == 0, \
+            f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim  = embed_dim // num_heads
+        self.dropout   = dropout
+        self.is_causal = is_causal
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor):
+        B, T, _ = query.shape
+        _, S, _ = key.shape
+
+        queries = self.q_proj(query).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        keys    = self.k_proj(key).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+        values  = self.v_proj(value).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+
+        dropout_p = self.dropout if self.training else 0.0
+        ctx_embeds = F.scaled_dot_product_attention(
+            queries, keys, values,
+            dropout_p=dropout_p,
+            is_causal=self.is_causal
+        )
+
+        ctx_embeds = ctx_embeds.transpose(1, 2).reshape(B, T, self.embed_dim)
+        return self.out_proj(ctx_embeds)
+
 
 class GPTTransformerBlock(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.attention_layer = nn.MultiheadAttention(config.embed_dim, config.num_heads, dropout=config.dropout, batch_first=True)
+        self.attention_layer = MultiHeadAttention(config.embed_dim, config.num_heads, config.dropout, is_causal=True)
         self.mlp = nn.Sequential(
-            nn.Linear(config.embed_dim, config.hidden_dim),
-            SwiGLU(config.hidden_dim, 2 * config.hidden_dim),
-            nn.Linear(config.hidden_dim, config.embed_dim),
+            SwiGLU(config.embed_dim, config.hidden_dim),
             nn.Dropout(config.dropout)
         )
         self.layer_norm1 = nn.LayerNorm(config.embed_dim)
         self.layer_norm2 = nn.LayerNorm(config.embed_dim)
 
-        causal_mask = torch.triu(torch.ones(config.ctx_len, config.ctx_len), diagonal=1)
-        self.register_buffer("attention_mask", causal_mask)
-
     def forward(self, x):
         # x -> B, T, D
-        T = x.shape[1]
         normed = self.layer_norm1(x)
-        attn_mask = self.attention_mask[:T, :T]
-        attn_out, _ = self.attention_layer(normed, normed, normed, attn_mask=attn_mask)
-        x = x + attn_out
+        x = x + self.attention_layer(normed, normed, normed)
         x = x + self.mlp(self.layer_norm2(x))
         return x
 
@@ -94,7 +123,6 @@ class GPTModel(nn.Module):
 
 
 
-
 if __name__ == '__main__':
 
     model = GPTModel(GPTConfig())
@@ -110,9 +138,3 @@ if __name__ == '__main__':
         params += layer.numel()
 
     print(f"No. of parameters in the model is: {params}")
-
-
-    """
-    Change the activation function from ReLU to something better
-    Add dropout where required
-    """
