@@ -4,8 +4,9 @@ Build a GPT style model
 
 import torch
 import torch.nn as nn
+from dataclasses import dataclass
 
-
+@dataclass
 class GPTConfig:
     vocab_size: int = 2048
     embed_dim: int = 512
@@ -16,15 +17,14 @@ class GPTConfig:
 
 
 def calculate_positional_encodings(positions: torch.Tensor, embed_dim: int):
-    """Calculate the 1d sinusoidal positional encodings"""
-    encodings = []
-    for pos in positions:
-        sin_enc = torch.sin(torch.tensor([pos/10000**((2*(i//2))/embed_dim) for i in range(embed_dim)]))
-        cos_enc = torch.cos(torch.tensor([pos/10000**((2*(i//2))/embed_dim) for i in range(embed_dim)]))
-        enc = torch.where(torch.arange(embed_dim)%2==0, sin_enc, cos_enc)
-        encodings.append(enc.unsqueeze(0))
-    encodings = torch.concat(encodings, dim=0)
-    return encodings
+    i = torch.arange(embed_dim // 2, dtype=torch.float32)
+    div_term = 10000 ** (2 * i / embed_dim)          # (D/2,)
+    pos = positions.float().unsqueeze(1)              # (T, 1)
+    args = pos / div_term                             # (T, D/2)
+    enc = torch.zeros(len(positions), embed_dim)
+    enc[:, 0::2] = torch.sin(args)
+    enc[:, 1::2] = torch.cos(args)
+    return enc
 
 
 class GPTTransformerBlock(nn.Module):
@@ -39,13 +39,18 @@ class GPTTransformerBlock(nn.Module):
         self.layer_norm1 = nn.LayerNorm(config.embed_dim)
         self.layer_norm2 = nn.LayerNorm(config.embed_dim)
 
+        causal_mask = torch.triu(torch.ones(config.ctx_len, config.ctx_len), diagonal=1)
+        self.register_buffer("attention_mask", causal_mask)
+
     def forward(self, x):
         # x -> B, T, D
-        ctx_embed, _ = self.attention_layer(x, x, x)
-        ctx_embed = self.layer_norm1(ctx_embed)
-        ctx_embed = self.mlp(ctx_embed)
-        ctx_embed = self.layer_norm2(ctx_embed)
-        return ctx_embed
+        T = x.shape[1]
+        normed = self.layer_norm1(x)
+        attn_mask = self.attention_mask[:T, :T]
+        attn_out, _ = self.attention_layer(normed, normed, normed, attn_mask=attn_mask)
+        x = x + attn_out
+        x = x + self.mlp(self.layer_norm2(x))
+        return x
 
 
 
@@ -85,6 +90,13 @@ if __name__ == '__main__':
 
     out = model(inp)
     print(out.shape)
+
+    params = 0
+    for layer in model.parameters():
+        params += layer.numel()
+
+    print(f"No. of parameters in the model is: {params}")
+
 
     """
     Change the activation function from ReLU to something better
