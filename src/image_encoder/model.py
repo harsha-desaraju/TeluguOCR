@@ -142,40 +142,42 @@ class ViTDecoder(nn.Module):
             index=restore_ids.unsqueeze(-1).repeat(1, 1, D)
         )
         wp = N // self.h_full
-        _x = _x + self.positional_encoding[:, wp ,:].reshape(N, D)
+        _x = _x + self.positional_encoding[:, :wp ,:].reshape(N, D)
         for block in self.transformer_blocks:
             _x = block(_x, padding_mask.bool())
         _x = self.decoder_norm(_x)
         proj = self.output_projection(_x)
         return proj
 
-
-
-
 class MaskedAutoEncoder(nn.Module):
-    def __init__(self, encoder_config: ViTConfig, decoder_config: ViTConfig, mask_ratio: float):
+    def __init__(self, encoder_config: ViTConfig, decoder_config: ViTConfig,mask_ratio: float, norm_pix_loss: bool = True):
         super().__init__()
 
         self.mask_ratio = mask_ratio
+        self.norm_pix_loss = norm_pix_loss
         self.patch_size = encoder_config.patch_size
         self.encoder_model = ViTEncoder(encoder_config)
         self.decoder_model = ViTDecoder(decoder_config, encoder_config.embed_dim)
-
 
     def forward(self, images: torch.Tensor, padding_masks: torch.Tensor):
         latent, mask, restore_ids = self.encoder_model(images, padding_masks,  self.mask_ratio)
 
         pred = self.decoder_model(latent, restore_ids, padding_masks)
 
-        target = patchify(images, self.patch_size)
+        target = patchify(images, self.patch_size)          # (B, N, patch_size**2)
 
-        loss = ((target - pred)**2).mean(dim=-1)
+        if self.norm_pix_loss:
+            mean = target.mean(dim=-1, keepdim=True)
+            var = target.var(dim=-1, keepdim=True)
+            target = (target - mean) / (var + 1e-6).sqrt()
+
+        loss = ((target - pred) ** 2).mean(dim=-1)
 
         valid_patch_mask = (~padding_masks.bool()).float()
         effective_mask = mask * valid_patch_mask
         loss = (loss * effective_mask).sum() / effective_mask.sum()
 
-        return {"loss": loss, "logits": pred}
+        return {"loss": loss, "logits": pred, "mask": mask}
 
 
 
@@ -205,6 +207,11 @@ if __name__ == '__main__':
         mask_ratio=0.75
     )
     # print(auto_encoder)
+
+    num_params = 0
+    for layer in auto_encoder.parameters():
+        num_params += layer.numel()
+    print(f"The size of the model is: {num_params}")
 
     pad_mask = torch.zeros((2, 256))
 
