@@ -7,7 +7,7 @@ from torchvision import transforms
 import torch.nn as nn
 from dataclasses import dataclass
 from transformers.trainer_utils import get_last_checkpoint
-from torch.utils.data import DataLoader, DistributedSampler
+import numpy as np
 
 
 def random_masking(x, mask_ratio):
@@ -116,15 +116,17 @@ class ImagePreprocessor:
             diff = self.image_height - target_size[0]
             pad_t, pad_b = diff//2, diff - diff//2
             pad_l, pad_r = 0, 0
+            fill_value = np.array(img)[:2, :].mean()
         else:
             target_size = (self.image_height, int(scale_factor*img_w))
             # Find the nearest multiple of patch size for padding
             diff = (-target_size[1]) % self.patch_size
             pad_l, pad_r = 0, diff
             pad_t, pad_b = 0, 0
+            fill_value = np.array(img)[:, -2:].mean()
 
         img = transforms.Resize(target_size)(img)
-        img = transforms.Pad((pad_l, pad_t, pad_r, pad_b), fill=255)(img)
+        img = transforms.Pad((pad_l, pad_t, pad_r, pad_b), fill=fill_value)(img)
 
         return self.to_tensor(img)
 
@@ -278,29 +280,35 @@ class ViTDecoder(nn.Module):
         return proj
 
 class MaskedAutoEncoder(nn.Module):
-    def __init__(self, encoder_config: ViTConfig, decoder_config: ViTConfig, mask_ratio: float):
+    def __init__(self, encoder_config: ViTConfig, decoder_config: ViTConfig,mask_ratio: float, norm_pix_loss: bool = True):
         super().__init__()
 
         self.mask_ratio = mask_ratio
+        self.norm_pix_loss = norm_pix_loss
         self.patch_size = encoder_config.patch_size
         self.encoder_model = ViTEncoder(encoder_config)
         self.decoder_model = ViTDecoder(decoder_config, encoder_config.embed_dim)
-
 
     def forward(self, images: torch.Tensor, padding_masks: torch.Tensor):
         latent, mask, restore_ids = self.encoder_model(images, padding_masks,  self.mask_ratio)
 
         pred = self.decoder_model(latent, restore_ids, padding_masks)
 
-        target = patchify(images, self.patch_size)
+        target = patchify(images, self.patch_size)          # (B, N, patch_size**2)
 
-        loss = ((target - pred)**2).mean(dim=-1)
+        if self.norm_pix_loss:
+            mean = target.mean(dim=-1, keepdim=True)
+            var = target.var(dim=-1, keepdim=True)
+            target = (target - mean) / (var + 1e-6).sqrt()
+
+        loss = ((target - pred) ** 2).mean(dim=-1)
 
         valid_patch_mask = (~padding_masks.bool()).float()
         effective_mask = mask * valid_patch_mask
         loss = (loss * effective_mask).sum() / effective_mask.sum()
 
-        return {"loss": loss, "logits": pred}
+        return {"loss": loss, "logits": pred, "mask": mask}
+
 
 
 
@@ -359,39 +367,9 @@ def find_last_checkpoint():
     return None
 
 
-class SequentialDistributedTrainer(Trainer):
-    def get_train_dataloader(self) -> DataLoader:
-
-        if self.args.world_size > 1:
-            print(f"Using Sequential Distributed Sampler in GPU: {self.args.process_index}")
-            # Multi-GPU: use DistributedSampler with shuffle=False
-            sampler = DistributedSampler(
-                self.train_dataset,
-                num_replicas=self.args.world_size,
-                rank=self.args.process_index,
-                shuffle=False,
-                drop_last=self.args.dataloader_drop_last,
-            )
-        else:
-            # Single GPU fallback
-            print("Using Sequential Sampler")
-            from torch.utils.data import SequentialSampler
-            sampler = SequentialSampler(self.train_dataset)
-
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.args.per_device_train_batch_size,
-            sampler=sampler,
-            collate_fn=self.data_collator,
-            drop_last=self.args.dataloader_drop_last,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=self.args.dataloader_pin_memory,
-        )
-
-
 if __name__ == '__main__':
     BATCH_SIZE = 1024
-    EPOCHS = 80
+    EPOCHS = 65
     TEST_SIZE = 0.05
 
     IMAGE_HEIGHT = 64
@@ -407,34 +385,21 @@ if __name__ == '__main__':
     # Read-only. Leave as None for the very first run.
     PREV_RUN_DIR = None  # e.g. "/kaggle/input/telugu-vitmae-prev/telugu-vitmae"
 
-
     # Load and Prepare the datasets
 
     configs = ["set_1", "set_2", "set_3", "set_4", "set_5"]
     ds = []
     for config in configs:
-        tds = load_dataset("harsha-desaraju/telugu-book-line-images-sorted", config, split="train",
+        tds = load_dataset("harsha-desaraju/telugu-book-line-images", config, split="train",
                            columns=['line_image', 'image_width'])
         ds.append(tds)
     ds = concatenate_datasets(ds)
 
-    # ds = load_dataset(
-    #     "harsha-desaraju/telugu-book-line-images-sample",
-    #     columns=['line_image', 'image_width']
-    # )["train"]
-
-    # Remove sampling to remove randomness in sample order
-    # split_dataset = ds.train_test_split(test_size=TEST_SIZE, seed=42)
-
-    num_test_samples = int(len(ds) * TEST_SIZE)
-
-    test_ds = ds.select(range(len(ds) - num_test_samples, len(ds)))
-    train_ds = ds.select(range(len(ds) - num_test_samples))
+    split_dataset = ds.train_test_split(test_size=TEST_SIZE, seed=42)
+    train_ds = split_dataset['train']
+    test_ds = split_dataset['test']
 
     preprocessor = ImagePreprocessor(IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PATCH_SIZE)
-
-    # train_ds = train_ds.map(preprocessor)
-    # test_ds = test_ds.map(preprocessor)
 
     train_ds = train_ds.with_format("torch", columns=['line_image'], output_all_columns=True)
     test_ds = test_ds.with_format("torch", columns=['line_image'], output_all_columns=True)
@@ -494,15 +459,13 @@ if __name__ == '__main__':
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
         adam_beta2=0.95,
-        # max_steps=20000, #   ---------------- ????????????
-        # group_by_length=True,
-        # length_column_name="image_width",
-        eval_strategy="steps",  # renamed from evaluation_strategy
-        eval_steps=2000,
-        save_strategy="steps",
-        save_steps=2000,  # checkpoint often — sessions can be cut
-        save_total_limit=2,  # keep storage under the ~20 GB cap
-        logging_steps=100,
+        eval_strategy="epoch",
+        # eval_steps=2000,
+        save_strategy="epoch",
+        # save_steps=2000,
+        save_total_limit=2,
+        logging_strategy="epoch",
+        # logging_steps=500,
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
         fp16=torch.cuda.is_available(),  # T4 = fp16 (no bf16 on Turing)
@@ -511,14 +474,13 @@ if __name__ == '__main__':
         dataloader_prefetch_factor=4,
         dataloader_persistent_workers=True,
         report_to="wandb",
-        run_name="vit-training"
+        run_name="vit-training-1"
     )
 
 
-    # # Add the image_width column to the dataset in hugging face.
-    # # Do the preprocessing using `with_transform` instead of map to save a lot of upfront time
+    # # Change to random sampling for better training
 
-    trainer = SequentialDistributedTrainer(
+    trainer = Trainer(
         model=mae_model,
         args=training_args,
         train_dataset=train_ds,
@@ -526,6 +488,7 @@ if __name__ == '__main__':
         data_collator=collator_function,
     )
 
-    # A path resumes; None starts fresh — neither raises (unlike passing True).
     trainer.train(resume_from_checkpoint=last_checkpoint)
-    trainer.save_model(OUTPUT_DIR)
+
+    # Save the model in pytorch
+    torch.save(mae_model.state_dict(), f"{OUTPUT_DIR}/final_model.pt")
