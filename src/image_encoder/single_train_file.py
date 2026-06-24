@@ -369,7 +369,7 @@ def find_last_checkpoint():
 
 if __name__ == '__main__':
     BATCH_SIZE = 1024
-    EPOCHS = 65
+    EPOCHS = 70
     TEST_SIZE = 0.05
 
     IMAGE_HEIGHT = 64
@@ -425,6 +425,9 @@ if __name__ == '__main__':
         mask_ratio=MASK_RATIO
     )
 
+    # Load the pre-trained model
+    mae_model.load_state_dict(torch.load("/kaggle/input/models/harshadesaraju1999/telugu-text-image-encoder/pytorch/default/1/final_model.pt"))
+
     num_params = 0
     for layer in mae_model.parameters():
         num_params += layer.numel()
@@ -449,32 +452,43 @@ if __name__ == '__main__':
 
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
+
+        # Number of epochs
+        num_train_epochs=EPOCHS,
+
+        # Batch size and Accumulation
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=1,  # raise to grow effective batch on T4
+
+        # Optimizer & Scheduler
         optim="adamw_torch_fused",
-        learning_rate=(1e-4 * BATCH_SIZE / 256),
-        num_train_epochs=EPOCHS,  # keep IDENTICAL across resumes
+        learning_rate=1e-4,
         weight_decay=0.05,
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
         adam_beta2=0.95,
+
+        # Save and Eval
         eval_strategy="epoch",
-        # eval_steps=2000,
         save_strategy="epoch",
-        # save_steps=2000,
         save_total_limit=2,
-        logging_strategy="epoch",
-        # logging_steps=500,
+
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
+
+        # Precision and performance
         fp16=torch.cuda.is_available(),  # T4 = fp16 (no bf16 on Turing)
         dataloader_num_workers=4,
         dataloader_pin_memory=True,
         dataloader_prefetch_factor=4,
         dataloader_persistent_workers=True,
+
+        # Logging and reporting
+        logging_strategy="epoch",
+        logging_first_step=True,
         report_to="wandb",
-        run_name="vit-training-1"
+        run_name="vit-training-2"
     )
 
 
