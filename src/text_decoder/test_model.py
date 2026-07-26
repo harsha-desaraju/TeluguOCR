@@ -88,14 +88,19 @@ if __name__ == '__main__':
     )
     model = GPTModel(model_config, pad_index=tokenizer.pad_token_type_id)
 
-    state_dict = torch.load("/Users/xai/Personal/Projects/TeluguOCR/models/text_decoder/results/telugu-grapheme-gpt/final_model.pt", map_location=torch.device('cpu'))
+    state_dict = torch.load("models/text_decoder/telugu-grapheme-gpt/final_model.pt", map_location=torch.device('cpu'))
     # state_dict = load_file("/Users/xai/Personal/Projects/TeluguOCR/models/text_decoder/results/telugu-grapheme-gpt/checkpoint-49479/model.safetensors")
     model.load_state_dict(state_dict)
     print(model)
 
-    # prefill = "ప్రియుడిని "
-    prefill = "W"
-    # prefill = "పూర్వోక్త ఏవం"
+    params = 0
+    for layer in model.parameters():
+        params += layer.numel()
+    print(f"The number of parameters in the model: {params}")
+
+    prefill = "ప్రియుడిని "          # Telugu
+    # prefill = "World"          # English
+    # prefill = "పూర్వోక్త ఏవం"      # Sanskrit
 
     # A few samples at a moderate temperature
     print("=== top-k 40 + top-p 0.95, temp 0.8 ===")
@@ -109,38 +114,3 @@ if __name__ == '__main__':
         out = sample_generate(model, tokenizer, prefill, max_new_tokens=50,
                               temperature=t, top_k=0, top_p=1.0, seed=0)
         print(f"[T={t}] {out}")
-
-
-
-
-    # # --------------------------------------------------
-    # # Greedy search
-    # # --------------------------------------------------
-    #
-    # model.eval()
-    #
-    # # prefill = "ప్రియుడిని కల్సుకోటానికి పారిపోయి "
-    # prefill = "మీకు తెలుగు టెక్స్ట్"
-    # # prefill = "Hello Wor"
-    # max_len = 100
-    #
-    # tokenized_output = tokenizer(prefill, return_tensors='pt', add_special_tokens=False)
-    # inp_toks = tokenized_output['input_ids']
-    # inp_toks = torch.concatenate([torch.tensor([[tokenizer.bos_token_id]]), inp_toks], dim=1)
-    # print(inp_toks)
-    #
-    #
-    #
-    # i=0
-    # with torch.no_grad():
-    #     while i < max_len:
-    #         logits = model(inp_toks, None).logits
-    #         probs = torch.softmax(logits, dim=-1)
-    #
-    #         # Greedy decoding
-    #         next_id = torch.argmax(probs[:, -1, :], dim=-1).unsqueeze(0)
-    #         inp_toks = torch.concatenate([inp_toks, next_id], dim=1)
-    #         print(tokenizer.decode(inp_toks))
-    #
-    #         # print(next_tok_id.logits.shape)
-    #         i += 1
