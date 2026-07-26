@@ -80,6 +80,8 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
 
         self.SPECIAL_TOKENS_LIST = [pad_token, unk_token, bos_token, eos_token, mask_token]
 
+        self.grapheme_pattern = regex.compile(r'\X')
+
         for tok in self.SPECIAL_TOKENS_LIST:
             if tok not in vocab:
                 vocab[tok] = len(vocab)
@@ -112,7 +114,7 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
 
     def _tokenize(self, text: str, **kwargs) -> List[str]:
         tokens = []
-        for grapheme in regex.findall(r"\X", text):
+        for grapheme in self.grapheme_pattern.findall(text):
             if grapheme in self.vocab:
                 tokens.append(grapheme)
             else:
@@ -192,4 +194,4 @@ if __name__ == "__main__":
         print('='*50)
 
 
-    # tokenizer.save_vocabulary("./", filename_prefix="telugu")
+    tokenizer.save_vocabulary("./", filename_prefix="telugu")
