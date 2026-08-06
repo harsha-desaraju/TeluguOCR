@@ -64,6 +64,8 @@ from data_curation.wikisource.scrape import (
     fetch_image_bytes,
     fetch_text,
     iter_category_pages,
+    list_category_pages,
+    resolve_image_urls,
     slugify,
     title_from_url,
 )
@@ -127,12 +129,41 @@ def _done_slugs(path: Path) -> set:
     return done
 
 
+def _resolve_missing_urls(pages, all_pages, cache, listing_cache) -> None:
+    """Top up `image_urls` on listing rows that will actually need a download.
+
+    Listings cached by earlier scrape.py versions predate image URLs being recorded.
+    A row whose page is already in the page cache never needs a URL, so only the
+    genuinely fetchable rows cost an API call (batched 50 titles per call), and the
+    topped-up listing is written back so each row's lookup is paid at most once.
+    """
+    def in_page_cache(page) -> bool:
+        if cache is None:
+            return False
+        slug = slugify(page)
+        return ((cache / "images" / f"{slug}.jpg").exists()
+                and (cache / "text" / f"{slug}.txt").exists())
+
+    need = [p for p in pages if not p.get("image_urls") and not in_page_cache(p)]
+    if not need:
+        return
+    resolve_image_urls(need)
+    if any(p.get("image_urls") for p in need):   # dicts are shared with all_pages
+        Path(listing_cache).write_text(
+            "".join(json.dumps(p, ensure_ascii=False) + "\n" for p in all_pages),
+            encoding="utf-8")
+
+
 def iter_jobs(cfg):
     """Yield the pages to process, from disk or straight off Wikisource.
 
-    In "scrape" mode this is a generator over the live category listing, so the
-    pipeline starts working on page 1 while the listing is still being walked --
-    there is no upfront wait for all 53k titles.
+    In "scrape" mode the category listing normally comes from `listing_cache` (a few
+    seconds to read) rather than from walking the live category, which costs one API
+    call per 50 titles INCLUDING the already-built range -- at 20k pages done that is
+    ~400 calls before the first new page is processed. The live walk still happens
+    when the cache file does not exist (so a smoke test never triggers a full ~1100
+    call listing pull by surprise) or when `listing_cache` is None; either way the
+    jobs are yielded lazily and processing starts on page 1 immediately.
     """
     if cfg["source"] == "dir":
         for page in load_pages(cfg["data_dir"], limit=cfg["limit_pages"]):
@@ -143,9 +174,24 @@ def iter_jobs(cfg):
     if cache:
         (cache / "images").mkdir(parents=True, exist_ok=True)
         (cache / "text").mkdir(parents=True, exist_ok=True)
-    for page in iter_category_pages(title_from_url(cfg["start_url"]), cfg["limit_pages"]):
+
+    category = title_from_url(cfg["start_url"])
+    listing_cache = cfg.get("listing_cache")
+    if listing_cache and (Path(listing_cache).exists() or cfg.get("refresh_listing")):
+        all_pages = list_category_pages(category, listing_cache,
+                                        refresh=cfg.get("refresh_listing", False))
+        pages = all_pages[:cfg["limit_pages"]] if cfg["limit_pages"] else all_pages
+        _resolve_missing_urls(pages, all_pages, cache, listing_cache)
+        source = pages
+    else:
+        if listing_cache:
+            print(f"[listing] no cache at {listing_cache}; walking the live listing "
+                  f"(set refresh_listing=True to build the cache in one pass)")
+        source = iter_category_pages(category, cfg["limit_pages"])
+
+    for page in source:
         slug = slugify(page)
-        job = {"slug": slug, "title": page["title"], "image_urls": page["image_urls"],
+        job = {"slug": slug, "title": page["title"], "image_urls": page.get("image_urls"),
                "image_path": None, "text": None}
         if cache:
             img_path, txt_path = cache / "images" / f"{slug}.jpg", cache / "text" / f"{slug}.txt"
@@ -393,7 +439,12 @@ if __name__ == "__main__":
     # Point it at data/wikisource_sample to rebuild against the dev set instead.
     PAGE_DIR = "data/wikisource"
     OUT_DIR = "data/wikisource_lines"
-    LIMIT_PAGES = 20000                      # int for a smoke test
+    # Counts from the start of the category listing, INCLUDING pages already built:
+    # pages in pages.jsonl are skipped, so a resumed run with limit 100 and 50 done
+    # processes exactly 51-100 and stops. It follows that re-running with the same
+    # limit is a no-op once the range is complete (only previously FAILED pages are
+    # retried -- failures are not recorded in pages.jsonl); to build more, raise it.
+    LIMIT_PAGES = 32000                      # int for a smoke test
 
     # ---- model ----
     VOCAB = "src/text_decoder/grapheme_tokenizer/telugu-vocab.json"
@@ -418,6 +469,17 @@ if __name__ == "__main__":
         # walked lazily and its length is not known up front. 53,506 = the category's
         # 53,714 members minus the 208 with no scan behind them.
         "expected_pages": 53_506,
+
+        # The category listing, cached to disk (same file scrape.py uses). Read in a
+        # couple of seconds instead of ~1 API call per 50 titles -- which a resumed
+        # run pays over the ALREADY-BUILT range too, several minutes of calls at 20k
+        # done before any new page is processed. The price is staleness: pages
+        # proofread after the cache was written are invisible until
+        # refresh_listing=True re-pulls the whole listing (~1100 calls, minutes).
+        # If the file does not exist the run falls back to walking the live listing.
+        # None -> always walk the live listing (the pre-cache behavior).
+        "listing_cache": str(Path(PAGE_DIR) / "category_pages.jsonl"),
+        "refresh_listing": False,
 
         # Keep the fetched scans. Costs ~16 GB for the full category and is worth it:
         # every rebuild after a threshold change or a bug fix then runs off disk in
@@ -495,8 +557,13 @@ if __name__ == "__main__":
     # top of it only oversubscribe them.
     cv2.setNumThreads(1)
 
+    # Round every batch the recogniser builds to a width multiple of this (and its row
+    # count to a power of two), so the MPS backend's per-shape graph cache stays at a
+    # few dozen entries instead of growing ~13 MB/page for the whole run. 0 disables.
+    WIDTH_BUCKET = 128
+
     segmenter = TesseractLayoutSegmenter(box_filter=BoxFilter())
-    engine = build_engine(CHECKPOINT, VOCAB)
+    engine = build_engine(CHECKPOINT, VOCAB, width_bucket=WIDTH_BUCKET)
 
     stats = build(segmenter, engine, CONFIG, POLICY)
     Path(OUT_DIR, "stats.json").write_text(
