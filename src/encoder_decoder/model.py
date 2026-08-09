@@ -33,21 +33,38 @@ class DecoderTransformerBlock(nn.Module):
         self.layer_norm1 = nn.LayerNorm(config.embed_dim)
         self.layer_norm2 = nn.LayerNorm(config.embed_dim)
 
-    def forward(self, x: torch.Tensor, encoder_output: torch.Tensor, attn_mask = None, padding_mask = None):
+    def forward(self, x: torch.Tensor, encoder_output: torch.Tensor, attn_mask = None, padding_mask = None,
+                past_self_kv=None, cross_kv=None, use_cache=False):
+        # KV cache (generation only): past_self_kv is the block's self-attention (k, v) to
+        # extend; cross_kv is the block's projected encoder K/V to reuse verbatim (computed
+        # on the first step). With use_cache=True returns (x, self_kv, cross_kv).
         normed = self.layer_norm1(x)
-        attn_out = self.attention_layer(normed, normed, normed, attn_mask)
+        if use_cache:
+            attn_out, self_kv = self.attention_layer(normed, normed, normed, attn_mask,
+                                                     past_kv=past_self_kv, use_cache=True)
+        else:
+            attn_out = self.attention_layer(normed, normed, normed, attn_mask)
+            self_kv = None
         x = x + attn_out
 
         if self.use_cross_attention:
             cross_in = self.layer_norm1_5(x)
-            cross_out = self.cross_attention_layer(cross_in, encoder_output, encoder_output, padding_mask)
+            if use_cache and cross_kv is not None:
+                # Encoder K/V are static across decode steps: reuse the projected cache.
+                cross_out = self.cross_attention_layer(cross_in, None, None, padding_mask,
+                                                       past_kv=cross_kv)
+            elif use_cache:
+                cross_out, cross_kv = self.cross_attention_layer(
+                    cross_in, encoder_output, encoder_output, padding_mask, use_cache=True)
+            else:
+                cross_out = self.cross_attention_layer(cross_in, encoder_output, encoder_output, padding_mask)
             x = x + torch.tanh(self.cross_attn_gate) * cross_out
 
         mlp_in = self.layer_norm2(x)
         mlp_out = self.mlp(mlp_in)
         x = x + mlp_out
 
-        return x
+        return (x, self_kv, cross_kv) if use_cache else x
 
 
 
@@ -89,12 +106,41 @@ class TextDecoder(nn.Module):
             combined = causal.unsqueeze(0).unsqueeze(0)                     # (1, 1, T, T)
         return combined
 
-    def forward(self, input_ids, encoder_output, text_padding_mask=None, img_text_padding_mask = None, labels = None):
+    def forward(self, input_ids, encoder_output, text_padding_mask=None, img_text_padding_mask = None, labels = None,
+                past_kvs=None, use_cache=False):
         # input_ids -> (B, T)
-        embeds = self.embedding_layer(input_ids)
+        #
+        # KV-cached generation: ``past_kvs`` is a per-block list of (self_kv, cross_kv)
+        # from the previous decode step. With use_cache=True, input_ids holds ONLY the new
+        # position(s) — positional encodings are offset by the cached length — and the
+        # method returns (CausalLMOutput, new_past_kvs), skipping the training-only LM
+        # loss (which is meaningless for a single-token step). Training / teacher-forced
+        # calls (defaults) are byte-for-byte the old behavior.
         T = input_ids.shape[1]
-        embeds = embeds + self.positional_encodings[:T].unsqueeze(0)
-        causal_attn_mask = self._build_causal_attn_mask(input_ids, text_padding_mask)
+        past_length = 0 if past_kvs is None else past_kvs[0][0][0].shape[2]
+        embeds = self.embedding_layer(input_ids)
+        embeds = embeds + self.positional_encodings[past_length:past_length + T].unsqueeze(0)
+        if past_length > 0:
+            # One new token per step: it may attend to every cached position and itself,
+            # so no causal mask is needed. (A multi-token continuation would need a
+            # rectangular causal mask; generate() only ever feeds one token at a time.)
+            causal_attn_mask = None
+        else:
+            causal_attn_mask = self._build_causal_attn_mask(input_ids, text_padding_mask)
+
+        if use_cache:
+            new_kvs = []
+            for i, block in enumerate(self.transformer_blocks):
+                past_self, past_cross = past_kvs[i] if past_kvs is not None else (None, None)
+                embeds, self_kv, cross_kv = block(
+                    embeds, encoder_output, attn_mask=causal_attn_mask,
+                    padding_mask=img_text_padding_mask,
+                    past_self_kv=past_self, cross_kv=past_cross, use_cache=True)
+                new_kvs.append((self_kv, cross_kv))
+            embeds = self.layer_norm(embeds)
+            logits = self.lm_head(embeds)
+            return CausalLMOutput(loss=None, logits=logits), new_kvs
+
         for block in self.transformer_blocks:
             embeds = block(embeds, encoder_output, attn_mask = causal_attn_mask, padding_mask = img_text_padding_mask)
         embeds = self.layer_norm(embeds)
@@ -129,6 +175,46 @@ class EncoderDecoder(nn.Module):
             self.enc_to_dec = nn.Linear(encoder_config.embed_dim, decoder_config.embed_dim)
         else:
             self.enc_to_dec = nn.Identity()
+
+    @torch.no_grad()
+    def generate(self, pixel_values, bos_id, eos_id, max_new_tokens=256, no_repeat_cycle=True,
+                 enc_out=None, cross_key_mask=None):
+        """Single-sample (B=1) greedy decode.
+
+        ``enc_out`` (the BRIDGED encoder output, i.e. already through enc_to_dec) and its
+        ``cross_key_mask`` may be passed in to REUSE a precomputed encoder forward — when
+        given, the encoder is not re-run here (``pixel_values`` is then used only for
+        batch size / device).
+
+        KV-CACHED: each step feeds only the newest token; self-attention K/V are extended
+        incrementally and the cross-attention K/V projections of the encoder output are
+        computed once on the first step and reused. Per-step cost is O(1) forwards instead
+        of re-running the whole growing sequence (and its unused LM loss) every token."""
+        self.eval()
+        # All frames are valid for a single un-padded image, so input_lengths=None
+        # (encode() then treats every frame as real and skips the cross-attn mask).
+        if enc_out is None:
+            enc_out, key_padding_mask = self.encoder_model.encode(pixel_values, None)
+            enc_out = self.enc_to_dec(enc_out)
+            cross_key_mask = None if key_padding_mask is None else (~key_padding_mask).unsqueeze(1).unsqueeze(2)
+        ids = torch.full((pixel_values.shape[0], 1), bos_id, dtype=torch.long, device=pixel_values.device)
+        ctx = self.decoder_model.positional_encodings.shape[0]
+        past_kvs = None
+        step_input = ids                      # first step: the BOS token
+        for _ in range(min(max_new_tokens, ctx - 1)):
+            out, past_kvs = self.decoder_model(step_input, enc_out, text_padding_mask=None,
+                                               img_text_padding_mask=cross_key_mask, labels=None,
+                                               past_kvs=past_kvs, use_cache=True)
+            nxt = out.logits[:, -1, :].argmax(-1, keepdim=True)
+            ids = torch.cat([ids, nxt], dim=1)
+            step_input = nxt                  # only the new token is fed next step
+            if nxt.item() == eos_id:
+                break
+            if no_repeat_cycle and ids.shape[1] > 24:  # stop short repeating loops
+                tail = ids[0, -12:].tolist()
+                if any(tail == tail[-k:] * (12 // k) for k in (1, 2, 3, 4)):
+                    break
+        return ids[0].tolist()
 
     def forward(self, pixel_values, input_ids, input_lengths = None, text_padding_mask=None):
         # pixel_values -> (B, 1, H, W); input_lengths -> (B,) valid frames = W_real // downsample

@@ -1226,14 +1226,30 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None):
-        # attn_mask: (B, 1, T, T) boolean — True means KEEP, False means MASK OUT
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None,
+                past_kv=None, use_cache=False):
+        # attn_mask: (B, 1, T, S) boolean — True means KEEP, False means MASK OUT
+        #
+        # KV cache (generation only): ``past_kv`` is (keys, values), each already projected,
+        # shape (B, heads, S_past, head_dim). Two modes:
+        #   * key is None     -> STATIC reuse (cross-attention): attend to past_kv as-is;
+        #                        the encoder K/V never change across decode steps.
+        #   * key is not None -> INCREMENTAL (self-attention): project only the new
+        #                        position(s) and append to past_kv.
+        # With use_cache=True the (possibly extended) (keys, values) pair is returned too.
+        # Training / full-sequence calls (past_kv=None, use_cache=False) are unchanged.
         B, T, _ = query.shape
-        _, S, _ = key.shape
-
         queries = self.q_proj(query).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        keys = self.k_proj(key).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-        values = self.v_proj(value).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+
+        if key is None:
+            keys, values = past_kv
+        else:
+            S = key.shape[1]
+            keys = self.k_proj(key).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+            values = self.v_proj(value).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+            if past_kv is not None:
+                keys = torch.cat([past_kv[0], keys], dim=2)
+                values = torch.cat([past_kv[1], values], dim=2)
 
         dropout_p = self.dropout if self.training else 0.0
         ctx_embeds = F.scaled_dot_product_attention(
@@ -1244,7 +1260,8 @@ class MultiHeadAttention(nn.Module):
         )
 
         ctx_embeds = ctx_embeds.transpose(1, 2).reshape(B, T, self.embed_dim)
-        return self.out_proj(ctx_embeds)
+        out = self.out_proj(ctx_embeds)
+        return (out, (keys, values)) if use_cache else out
 
 
 class GPTTransformerBlock(nn.Module):
@@ -1357,21 +1374,38 @@ class DecoderTransformerBlock(nn.Module):
         self.layer_norm1 = nn.LayerNorm(config.embed_dim)
         self.layer_norm2 = nn.LayerNorm(config.embed_dim)
 
-    def forward(self, x: torch.Tensor, encoder_output: torch.Tensor, attn_mask=None, padding_mask=None):
+    def forward(self, x: torch.Tensor, encoder_output: torch.Tensor, attn_mask=None, padding_mask=None,
+                past_self_kv=None, cross_kv=None, use_cache=False):
+        # KV cache (generation only): past_self_kv is the block's self-attention (k, v) to
+        # extend; cross_kv is the block's projected encoder K/V to reuse verbatim (computed
+        # on the first step). With use_cache=True returns (x, self_kv, cross_kv).
         normed = self.layer_norm1(x)
-        attn_out = self.attention_layer(normed, normed, normed, attn_mask)
+        if use_cache:
+            attn_out, self_kv = self.attention_layer(normed, normed, normed, attn_mask,
+                                                     past_kv=past_self_kv, use_cache=True)
+        else:
+            attn_out = self.attention_layer(normed, normed, normed, attn_mask)
+            self_kv = None
         x = x + attn_out
 
         if self.use_cross_attention:
             cross_in = self.layer_norm1_5(x)
-            cross_out = self.cross_attention_layer(cross_in, encoder_output, encoder_output, padding_mask)
+            if use_cache and cross_kv is not None:
+                # Encoder K/V are static across decode steps: reuse the projected cache.
+                cross_out = self.cross_attention_layer(cross_in, None, None, padding_mask,
+                                                       past_kv=cross_kv)
+            elif use_cache:
+                cross_out, cross_kv = self.cross_attention_layer(
+                    cross_in, encoder_output, encoder_output, padding_mask, use_cache=True)
+            else:
+                cross_out = self.cross_attention_layer(cross_in, encoder_output, encoder_output, padding_mask)
             x = x + torch.tanh(self.cross_attn_gate) * cross_out
 
         mlp_in = self.layer_norm2(x)
         mlp_out = self.mlp(mlp_in)
         x = x + mlp_out
 
-        return x
+        return (x, self_kv, cross_kv) if use_cache else x
 
 
 class TextDecoder(nn.Module):
@@ -1411,12 +1445,41 @@ class TextDecoder(nn.Module):
             combined = causal.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
         return combined
 
-    def forward(self, input_ids, encoder_output, text_padding_mask=None, img_text_padding_mask=None, labels=None):
+    def forward(self, input_ids, encoder_output, text_padding_mask=None, img_text_padding_mask=None, labels=None,
+                past_kvs=None, use_cache=False):
         # input_ids -> (B, T)
-        embeds = self.embedding_layer(input_ids)
+        #
+        # KV-cached generation: ``past_kvs`` is a per-block list of (self_kv, cross_kv)
+        # from the previous decode step. With use_cache=True, input_ids holds ONLY the new
+        # position(s) — positional encodings are offset by the cached length — and the
+        # method returns (CausalLMOutput, new_past_kvs), skipping the training-only LM
+        # loss (which is meaningless for a single-token step). Training / teacher-forced
+        # calls (defaults) are byte-for-byte the old behavior.
         T = input_ids.shape[1]
-        embeds = embeds + self.positional_encodings[:T].unsqueeze(0)
-        causal_attn_mask = self._build_causal_attn_mask(input_ids, text_padding_mask)
+        past_length = 0 if past_kvs is None else past_kvs[0][0][0].shape[2]
+        embeds = self.embedding_layer(input_ids)
+        embeds = embeds + self.positional_encodings[past_length:past_length + T].unsqueeze(0)
+        if past_length > 0:
+            # One new token per step: it may attend to every cached position and itself,
+            # so no causal mask is needed. (A multi-token continuation would need a
+            # rectangular causal mask; generate() only ever feeds one token at a time.)
+            causal_attn_mask = None
+        else:
+            causal_attn_mask = self._build_causal_attn_mask(input_ids, text_padding_mask)
+
+        if use_cache:
+            new_kvs = []
+            for i, block in enumerate(self.transformer_blocks):
+                past_self, past_cross = past_kvs[i] if past_kvs is not None else (None, None)
+                embeds, self_kv, cross_kv = block(
+                    embeds, encoder_output, attn_mask=causal_attn_mask,
+                    padding_mask=img_text_padding_mask,
+                    past_self_kv=past_self, cross_kv=past_cross, use_cache=True)
+                new_kvs.append((self_kv, cross_kv))
+            embeds = self.layer_norm(embeds)
+            logits = self.lm_head(embeds)
+            return CausalLMOutput(loss=None, logits=logits), new_kvs
+
         for block in self.transformer_blocks:
             embeds = block(embeds, encoder_output, attn_mask=causal_attn_mask, padding_mask=img_text_padding_mask)
         embeds = self.layer_norm(embeds)
@@ -1486,7 +1549,12 @@ class EncoderDecoder(nn.Module):
         ``enc_out`` (the BRIDGED encoder output, i.e. already through enc_to_dec) and its
         ``cross_key_mask`` may be passed in to REUSE a single encoder forward across the
         generation / teacher-forced / CTC decoders in eval — when given, the encoder is
-        not re-run here (``pixel_values`` is then used only for batch size / device)."""
+        not re-run here (``pixel_values`` is then used only for batch size / device).
+
+        KV-CACHED: each step feeds only the newest token; self-attention K/V are extended
+        incrementally and the cross-attention K/V projections of the encoder output are
+        computed once on the first step and reused. Per-step cost is O(1) forwards instead
+        of re-running the whole growing sequence (and its unused LM loss) every token."""
         self.eval()
         # All frames are valid for a single un-padded image, so input_lengths=None
         # (encode() then treats every frame as real and skips the cross-attn mask).
@@ -1496,11 +1564,15 @@ class EncoderDecoder(nn.Module):
             cross_key_mask = None if key_padding_mask is None else (~key_padding_mask).unsqueeze(1).unsqueeze(2)
         ids = torch.full((pixel_values.shape[0], 1), bos_id, dtype=torch.long, device=pixel_values.device)
         ctx = self.decoder_model.positional_encodings.shape[0]
+        past_kvs = None
+        step_input = ids                      # first step: the BOS token
         for _ in range(min(max_new_tokens, ctx - 1)):
-            out = self.decoder_model(ids, enc_out, text_padding_mask=None,
-                                     img_text_padding_mask=cross_key_mask, labels=None)
+            out, past_kvs = self.decoder_model(step_input, enc_out, text_padding_mask=None,
+                                               img_text_padding_mask=cross_key_mask, labels=None,
+                                               past_kvs=past_kvs, use_cache=True)
             nxt = out.logits[:, -1, :].argmax(-1, keepdim=True)
             ids = torch.cat([ids, nxt], dim=1)
+            step_input = nxt                  # only the new token is fed next step
             if nxt.item() == eos_id:
                 break
             if no_repeat_cycle and ids.shape[1] > 24:  # stop short repeating loops
@@ -2115,7 +2187,7 @@ if __name__ == '__main__':
 
     # ---------------------------- Data config (PORTED: same datasets as train_ctc_encoder.py) ----
     DATASET_NAME1 = "harsha-desaraju/sample-dataset-new"          # synthetic (has text_source)
-    DATASET_NAME2 = "harsha-desaraju/telugu-pdf-line-image-text"  # real PDF-line crops
+    DATASET_NAME2 = "harsha-desaraju/telugu-wikisource-text-images"  # real PDF-line crops
     DATASET_SPLIT = "train"          # NORMAL (downloaded, map-style) dataset
     EVAL_SPLIT = "validation"        # small held-out split for the eval slices
     IMAGE_COLUMN = "image"
@@ -2123,7 +2195,8 @@ if __name__ == '__main__':
     SOURCE_COLUMN = "text_source"    # natural / random / real; drives augmentation + eval slices
     TRAIN_CONFIGS = [
                     # 'train_0000', 'train_0001', 'train_0002', 'train_0003',
-                     'train_0004', 'train_0005', 'train_0006', 'train_0007',
+                     'train_0004', 'train_0005',
+                    # 'train_0006', 'train_0007',
                      ]
     RND_SAM_FRAC = 0.05
 
@@ -2146,18 +2219,18 @@ if __name__ == '__main__':
     # encoder in between. Tune per your run.
     LR = {                           # per-tier PEAK (max) LR
         "encoder": 3e-5,
-        "cross":   1e-4,
-        "lm":      1e-5,
+        "cross":   5e-5,
+        "lm":      3e-5,
     }
     MIN_LR = {                       # per-tier cosine FLOOR (min) LR
         "encoder": 3e-6,
-        "cross":   1e-5,
-        "lm":      1e-6,
+        "cross":   5e-6,
+        "lm":      3e-6,
     }
     WARMUP_STEPS = 2000
     WEIGHT_DECAY = 0.05
     BETAS = (0.9, 0.98)
-    EPOCHS = 4
+    EPOCHS = 5
 
     # eval / io
     EVAL_SLICE_CAP = 1500            # cap each eval slice for speed
@@ -2258,7 +2331,7 @@ if __name__ == '__main__':
         # NCCL collective timeout (default 1800s = 30min). The rank-0-only CER eval makes
         # the other ranks idle-wait at the next barrier; raise this so a slow eval / save
         # can never trip the watchdog. This is the timeout that killed the 2-GPU run.
-        ddp_timeout=7200,                        # 2h
+        ddp_timeout=3600,                        # 2h
 
         # Optimizer + LR are supplied explicitly via `optimizers=` below (build_optimizer),
         # and the warmup->cosine-to-min_lr scheduler is built by create_scheduler, so no
