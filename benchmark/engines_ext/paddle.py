@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from src.telugu_ocr.engines.base import OCREngine
+from benchmark.engines_ext.base import OCREngine
 
 class PaddleOCREngine(OCREngine):
     """PaddleOCR recognition-only.

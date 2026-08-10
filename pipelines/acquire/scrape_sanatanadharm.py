@@ -3,7 +3,7 @@ import os
 import json
 import hashlib
 from pathlib import Path
-from scraper import WebScraper
+from pipelines.acquire.scraper import WebScraper
 from urllib.parse import unquote, urlparse
 
 

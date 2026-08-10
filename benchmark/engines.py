@@ -53,9 +53,9 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
-from src.telugu_ocr.engines.base import OCREngine, to_pil as _to_pil
-from src.telugu_ocr.engines.paddle import PaddleOCREngine
-from src.telugu_ocr.engines.tesseract import TesseractEngine
+from benchmark.engines_ext.base import OCREngine, to_pil as _to_pil
+from benchmark.engines_ext.paddle import PaddleOCREngine
+from benchmark.engines_ext.tesseract import TesseractEngine
 
 
 

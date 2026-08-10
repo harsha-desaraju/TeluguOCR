@@ -62,7 +62,12 @@ configs, never from the defaults.
   fine-tuning stages, selected by `STAGE` / `STAGE_CONFIGS`). They import from the
   package; `scripts/bundle.py` re-inlines one into a standalone file for Kaggle.
 - `src/telugu_ocr/training/` — `optim.py`, `trainer.py`, `callbacks.py`, `checkpoint.py`,
-  `eval_slices.py`; `src/telugu_ocr/engines/` and `metrics/` for OCR engines and scoring.
+  `eval_slices.py`, and `metrics/` (CER/AER + normalisation).
+- `benchmark/` — multi-engine scoring, plus `engines_ext/` (the Tesseract / PaddleOCR
+  adapters and the shared `OCREngine` contract). These are NOT part of the model;
+  `src/telugu_ocr/` imports nothing from them. `pipelines/label/` does import them for
+  consensus labelling, so the labelling pipeline depends on `benchmark/` — a known
+  trade, noted in `benchmark/engines_ext/__init__.py`.
 - `pipelines/` — data pipelines, by stage: `acquire/` (PDF scraping/downloading),
   `pages/` (PDF→images), `synth/` (synthetic text-line generation + fonts),
   `label/` (pseudo-labelling), `publish/` (push datasets to HF Hub), and

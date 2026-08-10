@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
 
-from src.telugu_ocr.engines.base import OCREngine
+from benchmark.engines_ext.base import OCREngine
 
 
 class TesseractEngine(OCREngine):

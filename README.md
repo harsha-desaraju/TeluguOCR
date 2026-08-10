@@ -14,15 +14,13 @@ substantially better than the general-purpose OCR engines:
 | ours (CTC greedy) | 0.0134 | 0.0223 | 0.1052 | 69.7% |
 | Tesseract 5.5 (`tel`, psm 13) | 0.0664 | 0.0999 | 0.3198 | 26.7% |
 | PaddleOCR 3.7 (`te`) | 0.0921 | 0.1384 | 0.4214 | 17.2% |
-| Surya <sup>†</sup> | 0.0988 | 0.1354 | 0.3610 | 24.1% |
+| Surya | 0.0988 | 0.1354 | 0.3610 | 24.1% |
 
 That is a **5.6× lower character error rate** than the strongest baseline, and it gets
 2.7× more lines exactly right. Reproduce with `python3 -m benchmark.run_benchmark`.
 
-<sub>† Surya is measured in a separate environment — it pins `pillow>=10.2,<11`, which
-cannot coexist with the rest of this stack — and merged in with
-`benchmark/merge_results.py`. Baselines are given their best measured settings, not
-their defaults; see `TesseractEngine`'s docstring for the psm sweep behind that choice.</sub>
+<sub>Baselines are given their best measured settings, not their defaults; see
+`TesseractEngine`'s docstring for the psm sweep behind that choice.</sub>
 
 ---
 
@@ -146,7 +144,8 @@ python3 -m benchmark.run_benchmark
 ```
 
 Train. Inputs are set inline in each script's `__main__` block — edit them there rather
-than passing flags:
+than passing flags. **The training loops ship with `/kaggle/...` paths** for the vocab and
+the pretrained checkpoints, so point those at your own copies before running locally:
 
 ```bash
 python3 -m src.telugu_ocr.training.loops.ctc          # the CTC image encoder
@@ -171,11 +170,10 @@ src/telugu_ocr/
   tokenizer/    grapheme.py · vocab.py · assets/ (the 2048-akshara vocabulary)
   data/         preprocess.py (line geometry) · augment.py (degradation) · collators.py
   training/     optim.py · trainer.py · callbacks.py · eval_slices.py · loops/
-  engines/      one OCREngine contract: tesseract.py · paddle.py
   metrics/      errors.py (CER/AER) · normalize.py
 pipelines/      acquire/ · pages/ · synth/ · label/ · publish/ · wikisource/
 configs/        model + training configs, and checkpoints.yaml (the artifact registry)
-benchmark/      multi-engine scoring with alignment and confusion tables
+benchmark/      multi-engine scoring, plus engines_ext/ (Tesseract + PaddleOCR adapters)
 scripts/        bundle.py (standalone generator) · eval/ (diagnostic runners)
 tests/          the regression oracles
 ```

@@ -375,9 +375,9 @@ class EngineResult:
     scores: list[float | None] | None = None
 
 
-from src.telugu_ocr.engines.base import OCREngine
-from src.telugu_ocr.engines.paddle import PaddleOCREngine
-from src.telugu_ocr.engines.tesseract import TesseractEngine
+from benchmark.engines_ext.base import OCREngine
+from benchmark.engines_ext.paddle import PaddleOCREngine
+from benchmark.engines_ext.tesseract import TesseractEngine
 
 
 # --------------------------------------------------------------------------------------
