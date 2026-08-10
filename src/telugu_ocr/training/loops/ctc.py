@@ -345,76 +345,9 @@ def load_checkpoint(model: ImageEncoderCTC, ckpt_path: str):
 
 
 # ============================================================================
-# Grapheme tokenizer (inlined, UNCHANGED)
+# Grapheme tokenizer
 # ============================================================================
-class TeluguGraphemeTokenizer(PreTrainedTokenizer):
-    vocab_files_names = {"vocab_file": "vocab.json"}
-    model_input_names = ["input_ids", "attention_mask"]
-
-    def __init__(self, vocab_file=None, vocab_list=None, add_bos_token=True, add_eos_token=True,
-                 pad_token="[PAD]", unk_token="[UNK]", bos_token="[BOS]", eos_token="[EOS]",
-                 mask_token="[MASK]", **kwargs):
-        vocab = {}
-        if vocab_file is not None:
-            with open(vocab_file, encoding="utf-8") as f:
-                vocab = json.load(f)
-        if not vocab and vocab_list is not None:
-            for g in vocab_list:
-                vocab[g] = len(vocab)
-        if not vocab:
-            raise AssertionError("Either `vocab_file` or `vocab_list` has to be given.")
-        self.SPECIAL_TOKENS_LIST = [pad_token, unk_token, bos_token, eos_token, mask_token]
-        self.grapheme_pattern = regex.compile(r"\X")
-        for tok in self.SPECIAL_TOKENS_LIST:
-            if tok not in vocab:
-                vocab[tok] = len(vocab)
-        self.vocab = vocab
-        self._inv_vocab = {v: k for k, v in vocab.items()}
-        self.add_bos_token, self.add_eos_token, self.UNK = add_bos_token, add_eos_token, unk_token
-        super().__init__(pad_token=pad_token, unk_token=unk_token, bos_token=bos_token,
-                         eos_token=eos_token, mask_token=mask_token, add_bos_token=add_bos_token,
-                         add_eos_token=add_eos_token, padding_side="right", model_max_length=4096, **kwargs)
-
-    @property
-    def vocab_size(self) -> int:
-        return len(self.vocab)
-
-    def get_vocab(self):
-        return dict(self.vocab)
-
-    def _tokenize(self, text, **kwargs):
-        out = []
-        for g in self.grapheme_pattern.findall(text):
-            if g in self.vocab:
-                out.append(g)
-            else:
-                out.extend(list(g))
-        return out
-
-    def _convert_token_to_id(self, token):
-        return self.vocab.get(token, self.vocab.get(self.UNK, 1))
-
-    def _convert_id_to_token(self, index):
-        return self._inv_vocab.get(index, self.UNK)
-
-    def convert_tokens_to_string(self, tokens):
-        return "".join(t for t in tokens if t not in self.SPECIAL_TOKENS_LIST)
-
-    def build_inputs_with_special_tokens(self, a, b=None):
-        bos = [self.bos_token_id] if self.add_bos_token else []
-        eos = [self.eos_token_id] if self.add_eos_token else []
-        out = bos + a + eos
-        if b is not None:
-            out += bos + b + eos
-        return out
-
-    def save_vocabulary(self, save_directory, filename_prefix=None):
-        os.makedirs(save_directory, exist_ok=True)
-        fname = (filename_prefix + "-" if filename_prefix else "") + "vocab.json"
-        path = os.path.join(save_directory, fname)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.vocab, f, ensure_ascii=False, indent=2)
-        return (path,)
+from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 
 
 # ============================================================================
