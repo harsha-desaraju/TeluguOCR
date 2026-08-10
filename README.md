@@ -8,9 +8,10 @@ real book scans it is trained and evaluated on.
 On a held-out set of **1,044 human-verified lines** from scanned Telugu books, it reads
 substantially better than the general-purpose OCR engines:
 
-![Grouped bar chart of character, akshara and word error rates for five OCR systems on 1,044 held-out Telugu lines. This model's two decoders are lowest in every group; the exact figures are in the table below.](benchmark/telugu_ocr_error_rates.png)
-
-![Horizontal bar chart of exact-line accuracy — the share of the 1,044 test lines transcribed with zero errors. This model leads by roughly 45 points; the exact figures are in the table below.](benchmark/telugu_ocr_exact_match.png)
+<p align="center">
+  <img src="benchmark/telugu_ocr_error_rates.png" width="48%" alt="Grouped bar chart of character, akshara and word error rates for five OCR systems on 1,044 held-out Telugu lines. This model's two decoders are lowest in every group; the exact figures are in the table below.">
+  <img src="benchmark/telugu_ocr_exact_match.png" width="48%" alt="Horizontal bar chart of exact-line accuracy — the share of the 1,044 test lines transcribed with zero errors. This model leads by roughly 45 points; the exact figures are in the table below.">
+</p>
 
 A **5.6× lower character error rate** than the strongest baseline, and 2.7× more lines
 read exactly right. Reproduce with `python3 -m benchmark.run_benchmark`.
@@ -18,13 +19,13 @@ read exactly right. Reproduce with `python3 -m benchmark.run_benchmark`.
 <details>
 <summary>The same numbers as a table</summary>
 
-| engine | CER ↓ | akshara ER ↓ | WER ↓ | exact lines ↑ |
+| engine | CER % ↓ | akshara ER % ↓ | WER % ↓ | exact lines % ↑ |
 |---|---|---|---|---|
-| **ours** (joint CTC + LM rescoring) | **0.0119** | **0.0198** | **0.0953** | **71.7%** |
-| ours (CTC greedy) | 0.0134 | 0.0223 | 0.1052 | 69.7% |
-| Tesseract 5.5 (`tel`, psm 13) | 0.0664 | 0.0999 | 0.3198 | 26.7% |
-| PaddleOCR 3.7 (`te`) | 0.0921 | 0.1384 | 0.4214 | 17.2% |
-| Surya | 0.0988 | 0.1354 | 0.3610 | 24.1% |
+| **ours** (joint CTC + LM rescoring) | **1.19** | **1.98** | **9.53** | **71.7** |
+| ours (CTC greedy) | 1.34 | 2.23 | 10.52 | 69.7 |
+| Tesseract 5.5 (`tel`, psm 13) | 6.64 | 9.99 | 31.98 | 26.7 |
+| PaddleOCR 3.7 (`te`) | 9.21 | 13.84 | 42.14 | 17.2 |
+| Surya | 9.88 | 13.54 | 36.10 | 24.1 |
 
 Baselines are given their best measured settings, not their defaults; see
 `TesseractEngine`'s docstring for the psm sweep behind that choice. Full per-engine
