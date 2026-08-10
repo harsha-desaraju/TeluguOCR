@@ -30,7 +30,12 @@ def preprocess_image(img: np.ndarray):
     image = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
     # 2 - Determine and correct skew
-    angle = determine_skew(image)
+    try:
+        angle = determine_skew(image)
+        if angle is None:
+            angle = 0
+    except Exception:
+        angle = 0
     image = rotate(image, angle, resize=True)
     image = (image * 255).astype("uint8")
 
@@ -71,7 +76,7 @@ def page_to_line_images(img: np.ndarray, min_width: int, min_height: int, max_wi
     max_height = int(max_height_percent * page_height)
 
     custom_config = r'--oem 3 --psm 3'
-    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME, config=custom_config, lang='tel')
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME, config=custom_config, lang=LANG)
     data = data[
         (data['level']==4) &
         (data['width'] >= min_width) &
@@ -145,14 +150,13 @@ def pdf_to_line_images_hf(file_path: Path, split: int, first_page: int | None = 
                 {"line_image": Image.fromarray(line_img), "file_name": file_name, "page_number": page_num}
                 for line_img in line_images
             ]
-            print(f"Processing page: {page_num}, Line Images: {len(ds_buffer)}")
 
             if len(ds_buffer) >= MIN_BATCH_SIZE:
                 dataset = Dataset.from_list(ds_buffer, ds_features)
                 dataset.push_to_hub(
                     repo_id=HF_REPO_ID,
-                    split=f"book-{split}_{b_num}",
-                    commit_message=f"Uploaded {file_name}"
+                    split=f"book_{split}_{b_num}",
+                    commit_message=f"Uploaded {file_name}: Batch {b_num}"
                 )
                 b_num += 1
                 del ds_buffer, dataset
@@ -164,8 +168,8 @@ def pdf_to_line_images_hf(file_path: Path, split: int, first_page: int | None = 
             dataset = Dataset.from_list(ds_buffer, ds_features)
             dataset.push_to_hub(
                 repo_id=HF_REPO_ID,
-                split=f"book-{split}_{b_num}",
-                commit_message=f"Uploaded {file_name}"
+                split=f"book_{split}_{b_num}",
+                commit_message=f"Uploaded {file_name}: Batch {b_num}"
             )
             del ds_buffer, dataset
             gc.collect()
@@ -182,9 +186,10 @@ MIN_HEIGHT = 10
 MAX_WIDTH_PERCENT = 0.95
 MAX_HEIGHT_PERCENT = 0.05
 IMAGE_FORMAT = "jpeg"
-MAX_FILE_SIZE_IN_MB = 20
+MAX_FILE_SIZE_IN_MB = 50
 NUM_JOBS = 8
-HF_REPO_ID = "harsha-desaraju/telugu-text-line-images"
+LANG = "eng"
+HF_REPO_ID = "harsha-desaraju/english-book-line-images"
 MIN_BATCH_SIZE = 10000
 
 
@@ -192,7 +197,7 @@ if __name__ == '__main__':
     load_dotenv()
     login(os.getenv("HF_TOKEN"))
 
-    pdfs_folder = Path(__file__).parents[2] / "data/pdf_files/free_gurukul"
+    pdfs_folder = Path(__file__).parents[2] / "data/pdf_files/english"
     pdf_file_paths = list(Path(pdfs_folder).rglob("*.pdf"))
 
     # Limit the PDFs to files of MAX_FILE_SIZE_IN_MB size
