@@ -57,25 +57,39 @@ configs, never from the defaults.
   `encoder_decoder.py` (the combined OCR model).
 - `src/telugu_ocr/tokenizer/` — `grapheme.py` + `vocab.py`, with the vocab and grapheme
   distributions under `assets/`.
-- `src/telugu_ocr/data/` — `preprocess.py` (`ImagePreprocessor`) and `augment.py`.
+- `src/telugu_ocr/data/` — `preprocess.py` (the one line-geometry implementation),
+  `augment.py` (the degradation pipeline), `collators.py` (`LineTensorizer`,
+  `CTCBatchMapper`, `OCRCollator` — all of which do NO resizing, see below).
 - `src/telugu_ocr/training/loops/` — `ctc.py`, `decoder_lm.py`, and `encdec.py` (both
   fine-tuning stages, selected by `STAGE` / `STAGE_CONFIGS`). They import from the
   package; `scripts/bundle.py` re-inlines one into a standalone file for Kaggle.
 - `src/telugu_ocr/training/` — `optim.py`, `trainer.py`, `callbacks.py`, `checkpoint.py`,
-  `eval_slices.py`, and `metrics/` (CER/AER + normalisation).
-- `benchmark/` — multi-engine scoring, plus `engines_ext/` (the Tesseract / PaddleOCR
-  adapters and the shared `OCREngine` contract). These are NOT part of the model;
-  `src/telugu_ocr/` imports nothing from them. `pipelines/label/` does import them for
-  consensus labelling, so the labelling pipeline depends on `benchmark/` — a known
-  trade, noted in `benchmark/engines.py`.
+  `eval_slices.py`.
+- `src/telugu_ocr/metrics/` — `errors.py` (edit distance, CER) and `normalize.py` (the
+  shared grapheme splitter; note the two `normalize` functions are deliberately NOT
+  merged, see that module's docstring).
+- `benchmark/` — `engines.py` holds the whole engine stack in one file: the shared
+  `OCREngine` contract, the Tesseract / PaddleOCR / Surya adapters and the wrapper around
+  this repo's own model. Plus `metrics.py` (alignment + confusion tables) and
+  `run_benchmark.py`. The adapters are NOT part of the model — `src/telugu_ocr/` imports
+  nothing from them and builds without pytesseract or paddleocr installed. But
+  `pipelines/label/` DOES import them for consensus labelling, so the labelling pipeline
+  depends on `benchmark/`, which is the wrong direction for a data pipeline and is a
+  deliberate trade recorded in `benchmark/engines.py`.
 - `pipelines/` — data pipelines, by stage: `acquire/` (PDF scraping/downloading),
   `pages/` (PDF→images), `synth/` (synthetic text-line generation + fonts),
   `label/` (pseudo-labelling), `publish/` (push datasets to HF Hub), and
   `wikisource/` (the Wikisource scrape→align→build→push pipeline, kept intact).
 - `configs/` — model/train configs and `checkpoints.yaml`, the registry saying which
   config reproduces which checkpoint.
-- `scripts/eval/` — ad-hoc diagnostic/eval runners (not a test suite).
-- `benchmark/`, `tools/annotation/`, `notebooks/`, `misc/`, `tests/`, `docs/`.
+- `scripts/` — `bundle.py` (generates the standalone single-file training script),
+  `token_fertility.py`, and `eval/` (ad-hoc diagnostic runners, not a test suite).
+- `tests/` — the regression oracles plus `model_registry.py` (builds any model from a
+  config) and `make_fingerprints.py` (re-records the checkpoint baseline).
+- `misc/` — one-off scripts and the exploratory notebooks (`model_diagnosis.ipynb`,
+  `syn-data-gen.ipynb`, `calculate-token-distribution.ipynb`). Per the coding rules
+  below, miscellaneous code belongs here.
+- `tools/annotation/` (the correction UI), `tests/`, `docs/`.
 - `models/` — training outputs and checkpoints (gitignored-ish; large, not source).
 - `data/` — corpora, generated images, `temp_test/` sample images. Gitignored.
 
@@ -128,9 +142,17 @@ configs, never from the defaults.
 ## Data pipeline (high level)
 
 Scrape/download Telugu PDFs → convert to page/line images → generate synthetic text-line
-images (Telugu 70% / Sanskrit 15% / English 15%, with grapheme-length distribution and
-augraphy augmentation) → push datasets to HF Hub → consume via `datasets.load_dataset`
-in training.
+images (rendered across 30 fonts × 6 sizes, then degraded by `data/augment.py`) → push
+datasets to HF Hub → consume via `datasets.load_dataset` in training.
+
+Real labelled lines come from two further routes: Wikisource proofread scans, cut into
+lines and aligned against the known page transcript (`pipelines/wikisource/`), and
+consensus pseudo-labelling, where several engines transcribe the same crop and only
+agreement is kept (`pipelines/label/`).
+
+The language mix of the text corpus (Telugu / Sanskrit / English) was fixed when
+`telugu-sanskrit-english-text-1024` was built; it is a property of that published
+dataset, not a constant you will find in this repo.
 
 ## General Coding Instructions
 1) Do not make the inputs command line arguments unless I explicitly ask for it. Use inline arguments only in the `__main__` block.

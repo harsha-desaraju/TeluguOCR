@@ -90,7 +90,7 @@ Everything else was verified byte-identical.
   builds `CTCEncoderConfig()` from dataclass defaults (1024px/128 frames) that no trained
   artifact uses. `FIXME(phase-3)` marks it. Fixing it means building from
   `configs/models/ctc_encoder_2048.yaml`.
-- **`notebooks/model_diagnosis.ipynb` called `make_weighted_augmenter`**, which exists
+- **`model_diagnosis.ipynb` called `make_weighted_augmenter`**, which exists
   nowhere in the repo and never has. Repointed at `make_augmenter`.
 - **`make_augmenter()` was called bare in all three loops**, resolving `p_clean` from each
   loop's own `P_CLEAN = 0.50` while the canonical default is `0.20`. Importing the shared
