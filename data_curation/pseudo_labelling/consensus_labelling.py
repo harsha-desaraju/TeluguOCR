@@ -657,36 +657,35 @@ def build_model_engine(checkpoint: str, vocab_file: str, **kwargs) -> OCREngine:
 
 
 class EncoderDecoderEngine(OCREngine):
-    """The ViT-encoder + GPT-decoder model with cross-attention, batched greedy decoding.
+    """CTC image encoder + cross-attending GPT decoder, batched greedy decoding.
 
-    Configs are pinned to the values stage-1/stage-2 trained with (see
-    src/encoder_decoder/train_stage_2.py); they have to match exactly or the strict load
-    below rejects the checkpoint. Note max_image_width is 1024 here, half the CTC model's.
+    Configs are pinned to the values stage-1 trained with; they have to match exactly or
+    the strict load below rejects the checkpoint. configs/models/encoder_decoder_stage1.yaml
+    records the same values, and tests/test_checkpoint_compat.py asserts they still load.
 
-    Three details are taken from the stage-2 collator rather than from
-    src/encoder_decoder/test_model.py, whose single-image path builds an ALL-ONES padding
-    mask -- which under this model's convention means "every patch is padding":
-      * img_padding_mask is (B, hp*wp) with 1 = PAD
-      * patches flatten row-major, and validity is identical across rows, so a column
-        mask is tiled over the hp rows
-      * a partially-real edge patch counts as REAL (ceil), not as padding
-    Getting any of these backwards degrades output quietly instead of erroring.
+    NOT A ViT. This engine used to build a ViT encoder (embed_dim=512, patch_size=8) and
+    feed the decoder a per-patch padding mask, because that is what the encoder-decoder was
+    before the CTC refactor. Every checkpoint that exists has a conv-stem encoder instead:
+    encoder_model.stem.blocks.N.conv.*, pos_embed (1, 256, 384), embed_dim 384. The old
+    code could not have run against one -- it imported a ViTConfig that no longer exists
+    anywhere in the repo, and it skipped enc_to_dec, so the decoder would have received
+    384-dim features where it expects 512. Both are fixed here.
+
+    The consequence for batching is that the encoder wants per-sample VALID FRAME COUNTS
+    (`input_lengths`, frames = ceil(W_real / downsample)) and derives its own frame mask.
+    There is no patch grid and no (B, hp*wp) mask any more.
     """
 
     name = "model"
     device_kind = "gpu"
 
     def __init__(self, checkpoint: str, vocab_file: str, device: str | None = None,
-                 max_tokens: int = 160, max_pixels_per_batch: int = 64 * 1024 * 16,
+                 max_tokens: int = 160, max_pixels_per_batch: int = 64 * 2048 * 8,
                  width_bucket: int = 128, amp: bool = True):
         import torch
-        # Imported from train_stage_2, NOT from src/encoder_decoder/model.py. That module
-        # is currently unimportable -- it does `from src.image_encoder.model import
-        # MaskedAutoEncoder`, and the MAE classes were removed from that file during the
-        # CTC refactor. train_stage_2.py carries the self-contained inlined copies (the
-        # repo's stated convention) and is the only working source for these classes.
-        from src.encoder_decoder.train_stage_2 import (EncoderDecoder, GPTConfig,
-                                                       ViTConfig)
+        from src.encoder_decoder.model import EncoderDecoder
+        from src.image_encoder.model import CTCEncoderConfig
+        from src.text_decoder.model import GPTConfig
         from src.text_decoder.grapheme_tokenizer.tokenizer import TeluguGraphemeTokenizer
 
         self.torch = torch
@@ -695,16 +694,19 @@ class EncoderDecoderEngine(OCREngine):
                                  else "cpu")
         self.tokenizer = TeluguGraphemeTokenizer(vocab_file=vocab_file)
         self.image_height = 64
-        self.patch_size = 8
-        self.max_image_width = 1024
+        self.downsample = 8              # conv-stem width reduction: T = W // downsample
+        self.max_image_width = 2048      # 256 frames, matching the trained checkpoint
         self.max_tokens = max_tokens
 
+        # These values are the ones the stage-1 checkpoint was trained with, verified by
+        # tests/test_checkpoint_compat.py against configs/models/encoder_decoder_stage1.yaml
+        # (strict load, 388 tensors). They are inlined rather than read from that YAML so
+        # this file stays runnable standalone on Kaggle -- if you change one, change both.
         decoder_config = GPTConfig(vocab_size=len(self.tokenizer), embed_dim=512,
                                    hidden_dim=1368, num_heads=8, num_layers=16,
                                    ctx_len=256, dropout=0.1)
-        encoder_config = ViTConfig(embed_dim=512, num_heads=8, dropout=0.1,
-                                   hidden_layer_size=2048, num_blocks=12, patch_size=8,
-                                   image_height=64, max_image_width=1024)
+        encoder_config = CTCEncoderConfig(max_image_width=self.max_image_width,
+                                          max_frames=self.max_image_width // self.downsample)
         self.model = EncoderDecoder(encoder_config=encoder_config,
                                     decoder_config=decoder_config,
                                     pad_index=self.tokenizer.pad_token_id)
@@ -722,36 +724,40 @@ class EncoderDecoderEngine(OCREngine):
         if self.width_bucket:
             # See TeluguCTCEngine: bound the distinct (rows, width) shapes, because the
             # MPS backend caches a compiled graph per shape and never evicts it. Dummy
-            # rows are zero images with an all-REAL mask (all-pad would soften attention
-            # over nothing but padding) and start the greedy loop already `done`.
+            # rows are zero images at FULL valid length (a zero length would make the
+            # encoder mask every frame, so cross-attention would see nothing but padding)
+            # and start the greedy loop already `done`.
             widest = min(-(widest // -self.width_bucket) * self.width_bucket,
                          self.max_image_width)
             rows = 1 << (B - 1).bit_length()
-        hp = self.image_height // self.patch_size
-        wp = widest // self.patch_size
-        # zero padding matches the stage-2 collator (masked out anyway)
+        # The encoder is the conv-stem CTC encoder: it takes per-sample VALID FRAME COUNTS
+        # and builds its own frame mask, not a ViT-style per-patch padding mask. Frames are
+        # ceil(W_real / downsample), capped at the padded width's frame count.
         imgs = torch.zeros((rows, 1, self.image_height, widest), dtype=torch.float32)
-        pad_mask = torch.zeros((rows, hp * wp), dtype=torch.float32)
+        frames_total = widest // self.downsample
+        lengths = torch.full((rows,), frames_total, dtype=torch.long)
         for slot, i in enumerate(idxs):
             a = arrays[i]
             w = a.shape[2]
             imgs[slot, :, :, :w] = torch.from_numpy(a)
-            real_wp = min((w + self.patch_size - 1) // self.patch_size, wp)   # ceil
-            col = torch.zeros(wp, dtype=torch.bool)
-            col[real_wp:] = True                                             # True = pad
-            pad_mask[slot] = col.unsqueeze(0).expand(hp, wp).reshape(-1).float()
+            lengths[slot] = min(-(w // -self.downsample), frames_total)      # ceil
 
         eos, bos = self.tokenizer.eos_token_id, self.tokenizer.bos_token_id
         try:
             imgs = imgs.to(self.device)
-            pad_mask = pad_mask.to(self.device)
+            lengths = lengths.to(self.device)
             with torch.no_grad():
                 ctx = (torch.autocast("cuda", dtype=torch.float16) if self.amp
                        else _nullcontext())
                 with ctx:
-                    enc, _, _ = self.model.encoder_model(imgs, padding_mask=pad_mask,
-                                                         mask_ratio=None)
-                    cross_key_mask = (~pad_mask.bool()).unsqueeze(1).unsqueeze(2)
+                    # Mirrors EncoderDecoder.forward, with encode() hoisted out of the
+                    # greedy loop -- calling the full forward per token would re-encode the
+                    # image once per emitted grapheme. enc_to_dec is NOT optional: it
+                    # projects the encoder's 384 dims to the decoder's 512.
+                    enc, key_padding_mask = self.model.encoder_model.encode(imgs, lengths)
+                    enc = self.model.enc_to_dec(enc)
+                    cross_key_mask = (None if key_padding_mask is None else
+                                      (~key_padding_mask).unsqueeze(1).unsqueeze(2))
                     ids = torch.full((rows, 1), bos, dtype=torch.long, device=self.device)
                     done = torch.zeros(rows, dtype=torch.bool, device=self.device)
                     done[B:] = True
@@ -780,7 +786,7 @@ class EncoderDecoderEngine(OCREngine):
 
     def run(self, images: list[Image.Image]) -> list[str | None]:
         arrays = [preprocess_for_ctc(im, self.image_height, self.max_image_width,
-                                     self.patch_size) for im in images]
+                                     self.downsample) for im in images]
         order = sorted(range(len(arrays)), key=lambda i: arrays[i].shape[2])
         out: list[str | None] = [None] * len(arrays)
         batch: list[int] = []
