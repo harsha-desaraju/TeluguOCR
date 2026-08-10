@@ -1,0 +1,18 @@
+# Training run that produced checkpoint `gpt_decoder`: causal grapheme LM pretraining.
+# Extracted from the __main__ block of src/text_decoder/train.py.
+#
+# That script's __main__ carries far fewer explicit knobs than the other three -- most of
+# the schedule is left to HuggingFace TrainingArguments defaults rather than being named.
+# Only what the script actually sets is recorded here; do not read absence as a default of
+# 0. Re-deriving the rest means reading the TrainingArguments call in that file.
+model: configs/models/gpt_decoder_512x16.yaml
+
+geometry:
+  ctx_len: 256                    # must equal the model's ctx_len
+
+optim:
+  batch_size: 64
+  epochs: 1
+
+# OUTPUT_DIR was ./telugu-grapheme-gpt, which is why the checkpoint lives at
+# models/text_decoder/telugu-grapheme-gpt/.

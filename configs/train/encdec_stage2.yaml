@@ -1,0 +1,53 @@
+# Stage-2 end-to-end refinement, from the __main__ block of
+# src/encoder_decoder/train_stage_2.py. No stage-2 checkpoint is present locally, so this
+# entry is currently unverified against any artifact -- add it to configs/checkpoints.yaml
+# once one is downloaded.
+#
+# The architecture is IDENTICAL to stage 1; what changes is what is unfrozen. Stage 2
+# trains encoder, cross-attention and LM together, each on its own LR tier, which is the
+# one substantive difference from stage 1's single tier.
+model: configs/models/encoder_decoder_stage1.yaml
+init_from: encoder_decoder_stage1      # stage-1 EncoderDecoder state dict
+
+data:
+  dataset_synthetic: harsha-desaraju/sample-dataset-new
+  dataset_real: harsha-desaraju/telugu-wikisource-text-images   # wikisource, not PDF crops
+  dataset_split: train
+  eval_split: validation
+  image_column: image
+  text_column: text
+  source_column: text_source      # natural / random / real; drives augmentation AND slices
+  rnd_sam_frac: 0.05
+  no_aug_sources: [real]          # real crops are already degraded; do not augment them
+
+geometry:
+  downsample: 8
+  image_height: 64
+  max_image_width: 2048
+
+optim:
+  per_device_batch: 32
+  grad_accum: 2
+  eval_batch: 32
+  # Per-tier PEAK learning rates. The encoder and LM are pretrained so they move slowly;
+  # the cross-attention is the only part trained from scratch in stage 1, so it gets the
+  # highest rate.
+  lr:
+    encoder: 3.0e-5
+    cross: 5.0e-5
+    lm: 3.0e-5
+  min_lr:                         # per-tier cosine floor
+    encoder: 3.0e-6
+    cross: 5.0e-6
+    lm: 3.0e-6
+  warmup_steps: 2000
+  weight_decay: 0.05
+  betas: [0.9, 0.98]
+  epochs: 5
+
+eval:
+  eval_slice_cap: 1500
+  eval_loss_cap: 512
+  save_eval_steps: 1000
+
+seed: 42

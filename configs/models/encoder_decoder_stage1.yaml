@@ -1,0 +1,26 @@
+# EncoderDecoder (CTC image encoder + cross-attending GPT decoder) as trained in stage 1.
+#
+# VERIFIED: these values make src.encoder_decoder.model.EncoderDecoder load
+# models/encoder_decoder/stage-1/telugu-ocr-stage1/model.safetensors with strict=True
+# (388 tensors = 149 encoder + 237 decoder + 2 enc_to_dec).
+#
+# THE ENCODER IS THE CONV-STEM CTC ENCODER, NOT A ViT.
+#     The checkpoint's encoder_model.* keys are stem.blocks.N.conv.*, pos_embed
+#     (1, 256, 384) and ctc_head (2049, 384) -- structurally identical to the standalone
+#     CTC encoder above. Older code (and the dead ViTConfig import that used to live in
+#     data_curation/pseudo_labelling/consensus_labelling.py) described this model as
+#     "ViT encoder + GPT decoder" with embed_dim=512; that is wrong for every checkpoint
+#     that exists. ViTConfig is not defined anywhere in the repo any more.
+kind: encoder_decoder
+target: src.encoder_decoder.model.EncoderDecoder
+encoder: configs/models/ctc_encoder_2048.yaml
+decoder: configs/models/gpt_decoder_512x16.yaml
+# EncoderDecoder takes pad_index as a constructor argument.
+pad_index_from_tokenizer: true
+# Layers that exist in EncoderDecoder but not in the pretrained decoder: they are the
+# cross-attention machinery added on top, so a stage-1 transfer expects exactly these as
+# `missing_keys` when loading the pretrained GPT with strict=False.
+newly_added_layers:
+  - cross_attention
+  - layer_norm1_5
+  - cross_attn_gate

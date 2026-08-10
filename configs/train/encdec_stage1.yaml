@@ -1,0 +1,46 @@
+# Training run that produced checkpoint `encoder_decoder_stage1`.
+# Extracted verbatim from the __main__ block of src/encoder_decoder/train_stage_1.py.
+# Recorded, not yet consumed -- see configs/train/ctc_encoder_2048.yaml.
+#
+# Stage 1 freezes the pretrained encoder and decoder and trains ONLY the newly added
+# cross-attention (cross_attention, layer_norm1_5, cross_attn_gate), which is why there is
+# a single LR tier here where stage 2 has three.
+model: configs/models/encoder_decoder_stage1.yaml
+
+data:
+  # Two sources mixed: synthetic line renders + real crops.
+  dataset_synthetic: harsha-desaraju/sample-dataset-new           # has text_source
+  dataset_real: harsha-desaraju/telugu-pdf-line-image-text        # real PDF-line crops
+  dataset_split: train
+  eval_split: validation
+  image_column: image
+  text_column: text
+  source_column: text_source      # natural / random -> eval slices (optional column)
+  rnd_sam_frac: 0.05              # fraction of random-text samples retained
+  # TRAIN_CONFIGS in the script enumerates the HF configs (train_0000, train_0001, ...)
+
+geometry:
+  downsample: 8
+  image_height: 64
+  max_image_width: 2048           # matches the CTC encoder (max_frames=256)
+
+optim:
+  per_device_batch: 32
+  grad_accum: 2
+  eval_batch: 32
+  lr: 1.0e-4                      # single tier, matches train_ctc_encoder.py
+  min_lr: 1.0e-5
+  warmup_steps: 2000
+  weight_decay: 0.05
+  betas: [0.9, 0.98]
+  epochs: 4
+
+eval:
+  eval_slice_cap: 1500
+  eval_loss_cap: 512              # rows used for the teacher-forced eval_loss set
+  save_eval_steps: 1000
+
+seed: 42
+
+# OUTPUT_DIR was /kaggle/working/telugu-ocr-stage1; PREV_RUN_DIR pointed at a prior run
+# re-mounted read-only for 12h resume.

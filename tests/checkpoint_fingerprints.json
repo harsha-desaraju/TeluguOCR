@@ -1,0 +1,81 @@
+{
+  "_README": "Baseline signatures for every checkpoint in configs/checkpoints.yaml. Regenerate with `python3 -m tests.make_fingerprints` only when a model or config change is intentional. Checked by tests/test_checkpoint_compat.py.",
+  "tokenizer": {
+    "vocab_file": "src/text_decoder/grapheme_tokenizer/telugu-vocab.json",
+    "length": 2048,
+    "pad_token_id": 2043,
+    "bos_token_id": 2045,
+    "eos_token_id": 2046
+  },
+  "checkpoints": {
+    "ctc_encoder_2048": {
+      "path": "models/image_encoder/ctc_encoder_stage-2/ctc-encoder-2048/model.safetensors",
+      "model_config": "configs/models/ctc_encoder_2048.yaml",
+      "kind": "ctc_encoder",
+      "structure": {
+        "n_tensors": 149,
+        "n_parameters": 20006529,
+        "keys_sha256": "642c63da189bc17f3ae0ba91e565e462fa22ab60ad8b74a29f144ae374b10a3a",
+        "shapes_sha256": "a743e457d98ba3b1c8c2dcd66fd52f9b821756d036fc9b39626ae83e3752bb39"
+      },
+      "forward": {
+        "shape": [
+          2,
+          32,
+          2049
+        ],
+        "mean": -12.645825,
+        "std": 2.70212,
+        "min": -23.312263,
+        "max": -0.184237,
+        "abs_sum": 1658323.0
+      }
+    },
+    "gpt_decoder": {
+      "path": "models/text_decoder/telugu-grapheme-gpt/final_model.pt",
+      "model_config": "configs/models/gpt_decoder_512x16.yaml",
+      "kind": "gpt_decoder",
+      "structure": {
+        "n_tensors": 181,
+        "n_parameters": 52659200,
+        "keys_sha256": "a10834cad27d44eaaabd63b3fa78781da3cc7eb1a17dbc308e2c467539a26c12",
+        "shapes_sha256": "6ad1a36b08ab934de3a2b66289de82476d3e6abb1a5d9cb13490f765eebfa42b"
+      },
+      "forward": {
+        "shape": [
+          2,
+          16,
+          2048
+        ],
+        "mean": -3.145487,
+        "std": 2.688432,
+        "min": -15.863487,
+        "max": 10.485806,
+        "abs_sum": 222262.812
+      }
+    },
+    "encoder_decoder_stage1": {
+      "path": "models/encoder_decoder/stage-1/telugu-ocr-stage1/model.safetensors",
+      "model_config": "configs/models/encoder_decoder_stage1.yaml",
+      "kind": "encoder_decoder",
+      "structure": {
+        "n_tensors": 388,
+        "n_parameters": 81259657,
+        "keys_sha256": "aaf02764e7b652beae6c38f0c7c739c115095e1f554c185dfb1c04b313ab8b6d",
+        "shapes_sha256": "3b1387406d9fffbec0eb0f54e445586aa7ff0dd7d3629aaed765312ba2dc28f3"
+      },
+      "forward": {
+        "shape": [
+          2,
+          16,
+          2048
+        ],
+        "mean": -1.07861,
+        "std": 2.230396,
+        "min": -12.023626,
+        "max": 13.902556,
+        "abs_sum": 122458.797
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+# GPTConfig for the pretrained Telugu grapheme-LM text decoder.
+#
+# VERIFIED: these values make src.text_decoder.model.GPTModel load
+# models/text_decoder/telugu-grapheme-gpt/final_model.pt with strict=True (181 tensors).
+#
+# The dataclass default for num_layers builds a SMALLER model than was trained -- loading
+# the checkpoint against defaults leaves 44 tensors unexpected (transformer_blocks.12+).
+# Hence every field is pinned here rather than inherited.
+#
+# vocab_size is not a free parameter: it must equal len(TeluguGraphemeTokenizer) built
+# from configs/tokenizer.yaml's vocab file. 2048 is that length today.
+kind: gpt_decoder
+target: src.text_decoder.model.GPTModel
+config_class: src.text_decoder.model.GPTConfig
+config:
+  vocab_size: 2048            # == len(tokenizer); pad=2043 bos=2045 eos=2046
+  embed_dim: 512
+  hidden_dim: 1368            # 2.67 * 512, i.e. 2/3 * 4 * embed_dim (SwiGLU sizing)
+  num_heads: 8
+  num_layers: 16              # NOT the dataclass default
+  ctx_len: 256
+  dropout: 0.1
+# GPTModel takes pad_index as a constructor argument, not a config field.
+pad_index_from_tokenizer: true

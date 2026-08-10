@@ -1,0 +1,34 @@
+# CTCEncoderConfig for the trained 2048px CTC image encoder.
+#
+# VERIFIED: these values make src.image_encoder.model.ImageEncoderCTC load
+# models/image_encoder/ctc_encoder_stage-2/ctc-encoder-2048/model.safetensors with
+# strict=True (149 tensors, no missing/unexpected keys, no shape mismatches).
+#
+# EVERY field is listed explicitly, including ones that equal the dataclass default.
+# That is deliberate: the dataclass defaults do NOT describe any trained artifact
+# (max_image_width defaults to 1024 / max_frames 128, i.e. the older 1024px model), so a
+# config that relied on defaults would silently build the wrong architecture if a default
+# ever changed. The checkpoint carries pos_embed of shape (1, 256, 384) -- 256 frames --
+# which is what max_frames=256 / max_image_width=2048 produces.
+kind: ctc_encoder
+target: src.image_encoder.model.ImageEncoderCTC
+config_class: src.image_encoder.model.CTCEncoderConfig
+config:
+  # ---- input ----
+  image_height: 64            # fixed by the positional design; collators assume it
+  max_image_width: 2048       # NOT the dataclass default (1024)
+  downsample: 8               # conv-stem width reduction: T = W // downsample
+  max_frames: 256             # = max_image_width // downsample; NOT the default (128)
+  # ---- conv stem ----
+  stem_channels: [32, 64, 128, 256, 320, 384]
+  num_groups: 32              # GroupNorm groups
+  # ---- transformer encoder ----
+  embed_dim: 384              # d_model, = last stem channel
+  num_layers: 10
+  num_heads: 8
+  mlp_dim: 1536
+  dropout: 0.1
+  drop_path_rate: 0.1
+  # ---- CTC head ----
+  vocab_size: 2048            # grapheme classes; blank appended at this index
+                              # -> ctc_head is (2049, 384)

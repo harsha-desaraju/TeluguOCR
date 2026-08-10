@@ -1,0 +1,60 @@
+# Registry of trained artifacts: which config reproduces which checkpoint, and which
+# script produced it.
+#
+# WHY THIS FILE EXISTS
+#     Before it, the answer to "what config trained this checkpoint?" lived only inside
+#     the `__main__` block of a 1600-2400 line training script, and the model dataclasses'
+#     defaults described none of the artifacts. Loading a checkpoint therefore meant
+#     guessing, and guessing wrong is quiet: an encoder built with max_image_width=1024
+#     against a 2048px checkpoint fails on one tensor's shape, and a decoder built with
+#     the default depth silently ignores 44 of the checkpoint's tensors.
+#
+#     tests/test_checkpoint_compat.py reads this file and asserts every entry still loads
+#     with strict=True. Run it before and after any refactor: it is the only thing that
+#     distinguishes "moved code" from "silently changed the architecture".
+#
+# `path` is relative to the repo root and lives under the gitignored models/ tree, so it
+# is absent on a fresh clone. The test degrades to fingerprint-only checking in that case
+# (see tests/checkpoint_fingerprints.json).
+
+tokenizer: configs/tokenizer.yaml
+
+checkpoints:
+
+  ctc_encoder_2048:
+    path: models/image_encoder/ctc_encoder_stage-2/ctc-encoder-2048/model.safetensors
+    model: configs/models/ctc_encoder_2048.yaml
+    trained_by: src/image_encoder/train_ctc_encoder.py
+    train_config: configs/train/ctc_encoder_2048.yaml
+    notes: >-
+      Stage-2 CTC encoder, widened from 128 to 256 position frames (1024px -> 2048px).
+      The position table is MERGED into a single pos_embed of (1, 256, 384); it is not
+      split into pos_embed + pos_embed_ext. Code that identifies the variant by looking
+      for a `pos_embed_ext` tensor misreports this checkpoint as the 1024px model --
+      count position rows instead.
+
+  gpt_decoder:
+    path: models/text_decoder/telugu-grapheme-gpt/final_model.pt
+    model: configs/models/gpt_decoder_512x16.yaml
+    trained_by: src/text_decoder/train.py
+    train_config: configs/train/decoder_lm.yaml
+    notes: >-
+      Causal grapheme LM used to initialise the encoder-decoder's decoder. 16 blocks;
+      the GPTConfig dataclass default is shallower.
+
+  encoder_decoder_stage1:
+    path: models/encoder_decoder/stage-1/telugu-ocr-stage1/model.safetensors
+    model: configs/models/encoder_decoder_stage1.yaml
+    trained_by: src/encoder_decoder/train_stage_1.py
+    train_config: configs/train/encdec_stage1.yaml
+    notes: >-
+      Stage 1 freezes the pretrained encoder and decoder and trains only the new
+      cross-attention. Its encoder is the CTC conv-stem encoder above, NOT a ViT.
+
+# Not yet present locally. Add an entry once a stage-2 checkpoint is downloaded, so the
+# compat test covers it too.
+#  encoder_decoder_stage2:
+#    path: models/encoder_decoder/stage-2/...
+#    model: configs/models/encoder_decoder_stage1.yaml   # same architecture as stage 1
+#    trained_by: src/encoder_decoder/train_stage_2.py
+#    train_config: configs/train/encdec_stage2.yaml

@@ -1,0 +1,44 @@
+# Training run that produced checkpoint `ctc_encoder_2048`.
+# Extracted verbatim from the __main__ block of src/image_encoder/train_ctc_encoder.py.
+# Recorded, not yet consumed: the script still holds its own copy. Wiring the loop to read
+# this file is Phase 3 of the refactor.
+model: configs/models/ctc_encoder_2048.yaml
+
+data:
+  dataset_split: train
+  eval_split: validation          # small held-out split for the eval slices
+  image_column: image
+  text_column: text
+  source_column: text_source      # natural / random, drives eval slices
+  width_column: image_width       # splits short/long eval slices (falls back to measuring)
+
+geometry:
+  downsample: 8
+  base_frames: 128                # old max: rows loaded from the 128-frame checkpoint
+  max_frames: 256                 # new max: T up to 256 -> 2048px
+  max_image_width: 2048
+  base_width: 1024                # base_frames * downsample; short/long boundary
+
+optim:
+  per_device_batch: 64
+  grad_accum: 2                   # global batch = per_device_batch * grad_accum * n_gpus
+  lr: 1.0e-4                      # single LR tier (pos_embed is one trained table now)
+  min_lr: 1.0e-5
+  warmup_steps: 1000
+  weight_decay: 0.05
+  betas: [0.9, 0.98]
+  epochs: 5
+
+eval:
+  eval_slice_cap: 1500            # cap each eval slice for speed
+  eval_batch: 32                  # smaller: long slices reach 2048px
+  save_eval_steps: 1000
+
+seed: 42
+
+# Paths were Kaggle-local in the original script and are intentionally not reproduced as
+# absolute paths here:
+#   OLD_CHECKPOINT  the 128-frame checkpoint whose pos_embed rows were loaded and widened
+#   OUTPUT_DIR      /kaggle/working/ctc-encoder-2048
+#   PREV_RUN_DIR    prior 2048-run output, re-mounted read-only for 12h resume
+#   VOCAB_FILE      see configs/tokenizer.yaml
