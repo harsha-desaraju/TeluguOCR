@@ -1,3 +1,17 @@
+"""Render synthetic Telugu line images: text -> font -> degraded height-64 crop.
+
+DOES NOT RUN AS-IS, and has not for a long time. Two separate reasons:
+
+  1. There is no ``if __name__ == "__main__"`` guard -- the whole file executes on
+     import, including the load_dataset below. That also makes the module unimportable,
+     so nothing can reuse anything in it.
+  2. It reads ``ocr_text_lines.parquet`` from the CURRENT WORKING DIRECTORY, and that
+     file is not in the repo. Supply it, or repoint the path.
+
+Fixing (1) means indenting the script body into a __main__ block, which is the
+convention the rest of this repo follows. Left alone so far because the file cannot be
+executed here to check the result.
+"""
 
 import random
 from pathlib import Path

@@ -89,7 +89,7 @@ configs, never from the defaults.
 - `misc/` — one-off scripts and the exploratory notebooks (`model_diagnosis.ipynb`,
   `syn-data-gen.ipynb`, `calculate-token-distribution.ipynb`). Per the coding rules
   below, miscellaneous code belongs here.
-- `tools/annotation/` (the correction UI), `tests/`, `docs/`.
+- `tools/annotation/` (the correction UI) and `tests/`.
 - `models/` — training outputs and checkpoints (gitignored-ish; large, not source).
 - `data/` — corpora, generated images, `temp_test/` sample images. Gitignored.
 
