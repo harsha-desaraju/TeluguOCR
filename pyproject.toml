@@ -31,7 +31,11 @@ dependencies = [
     # --- images + augmentation ---
     "pillow>=10.4.0",
     "numpy>=2.3.4",
-    "opencv-python>=5.0.0.93",
+    # Capped below 5: opencv-python 5.0.0.93 installs but `import cv2` yields an empty
+    # namespace shell on darwin (cv2.__file__ is None, no __version__, no
+    # FONT_HERSHEY_SIMPLEX), which breaks every cv2 caller -- image_augmentation.py:883
+    # and pdf_to_images.py among them. 4.x imports correctly.
+    "opencv-python>=4.10.0,<5",
     "scikit-image>=0.25.2",
     "augraphy>=8.2.6",
     "deskew>=1.6.0",
