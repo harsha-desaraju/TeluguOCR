@@ -112,3 +112,7 @@ Icon?
 .env
 .env.*
 !.env.example
+
+# Generated single-file training scripts (scripts/bundle.py). Regenerate, never edit.
+*_bundled.py
+*_kaggle.py
