@@ -102,8 +102,17 @@ Icon?
 .idea/
 
 data_curation/synthetic/
-data/
-models/
+
+# Large local artifacts. LEADING SLASH IS LOAD-BEARING: a bare `data/` or `models/`
+# matches a directory of that name at ANY depth, which silently swallowed
+# configs/models/*.yaml -- and would swallow src/**/data/ after the package refactor.
+# Anchored, these match only the top-level directories they mean.
+/data/
+/models/
+
+# Dataset output written next to the script that produced it (save_to_disk arrow shards,
+# a few GB). Previously covered by the unanchored `data/` above.
+data_curation/**/data/
 
 # Secrets
 .env
