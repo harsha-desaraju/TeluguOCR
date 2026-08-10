@@ -57,14 +57,30 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None):
-        # attn_mask: (B, 1, T, T) boolean — True means KEEP, False means MASK OUT
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None,
+                past_kv=None, use_cache=False):
+        # attn_mask: (B, 1, T, S) boolean — True means KEEP, False means MASK OUT
+        #
+        # KV cache (generation only): ``past_kv`` is (keys, values), each already projected,
+        # shape (B, heads, S_past, head_dim). Two modes:
+        #   * key is None     -> STATIC reuse (cross-attention): attend to past_kv as-is;
+        #                        the encoder K/V never change across decode steps.
+        #   * key is not None -> INCREMENTAL (self-attention): project only the new
+        #                        position(s) and append to past_kv.
+        # With use_cache=True the (possibly extended) (keys, values) pair is returned too.
+        # Training / full-sequence calls (past_kv=None, use_cache=False) are unchanged.
         B, T, _ = query.shape
-        _, S, _ = key.shape
-
         queries = self.q_proj(query).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        keys    = self.k_proj(key).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-        values  = self.v_proj(value).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+
+        if key is None:
+            keys, values = past_kv
+        else:
+            S = key.shape[1]
+            keys   = self.k_proj(key).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+            values = self.v_proj(value).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+            if past_kv is not None:
+                keys = torch.cat([past_kv[0], keys], dim=2)
+                values = torch.cat([past_kv[1], values], dim=2)
 
         dropout_p = self.dropout if self.training else 0.0
         ctx_embeds = F.scaled_dot_product_attention(
@@ -75,7 +91,8 @@ class MultiHeadAttention(nn.Module):
         )
 
         ctx_embeds = ctx_embeds.transpose(1, 2).reshape(B, T, self.embed_dim)
-        return self.out_proj(ctx_embeds)
+        out = self.out_proj(ctx_embeds)
+        return (out, (keys, values)) if use_cache else out
 
 
 class GPTTransformerBlock(nn.Module):
