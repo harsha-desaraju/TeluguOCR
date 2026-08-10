@@ -50,16 +50,18 @@ from PIL import Image
 import torchvision.transforms as transforms
 from safetensors.torch import load_file
 
-# --- imports resolve whether run as `python3 test_model.py` (from this dir) or
-#     `python3 -m src.image_encoder.test_model` (from the repo root) ---
+# --- imports resolve whether run as `python3 scripts/eval/image_encoder.py` or
+#     `python3 -m scripts.eval.image_encoder` (from the repo root) ---
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-for _p in (_HERE, _ROOT):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-from model import CTCEncoderConfig, ImageEncoderCTC  # noqa: E402
-from src.text_decoder.grapheme_tokenizer.tokenizer import (  # noqa: E402
+from src.telugu_ocr.models.image_encoder import (  # noqa: E402
+    CTCEncoderConfig,
+    ImageEncoderCTC,
+)
+from src.telugu_ocr.tokenizer.grapheme import (  # noqa: E402
     TeluguGraphemeTokenizer,
 )
 
@@ -487,7 +489,7 @@ def _resolve_telugu_font(font_path=None):
     Telugu font already known to matplotlib."""
     from matplotlib import font_manager as fm
     candidates = [font_path] if font_path else []
-    repo_fonts = os.path.join(_ROOT, "data_curation/text_line_images/fonts")
+    repo_fonts = os.path.join(_ROOT, "pipelines/synth/fonts")
     candidates += [os.path.join(repo_fonts, n)
                    for n in ("Gautami.ttf", "Vani.ttf", "mallanna.ttf", "NTR-Regular.ttf")]
     for c in candidates:
@@ -546,7 +548,7 @@ if __name__ == "__main__":
     # MODEL_PATH = "/Users/xai/Personal/Projects/TeluguOCR/models/image_encoder/ctc_encoder/ctc-encoder/checkpoint-152000/model.safetensors"
     MODEL_PATH = "/Users/xai/Personal/Projects/TeluguOCR/models/image_encoder/ctc_encoder_stage-2/ctc-encoder-2048/model.safetensors"
     FOLDER_PATH = "/Users/xai/Personal/Projects/TeluguOCR/data/temp_test"   # folder of line images to read
-    VOCAB_FILE = os.path.join(_ROOT, "src/text_decoder/grapheme_tokenizer/telugu-vocab.json")
+    VOCAB_FILE = os.path.join(_ROOT, "src/telugu_ocr/tokenizer/assets/telugu-vocab.json")
 
     NUM_HEADS = 8                  # not inferable from weights; must match training
     BATCH_SIZE = 16

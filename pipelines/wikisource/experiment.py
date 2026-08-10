@@ -55,9 +55,9 @@ from PIL import Image
 from rapidfuzz.distance import Levenshtein
 from tqdm.auto import tqdm
 
-from data_curation.pseudo_labelling.consensus_labelling import graphemes, normalize
-from data_curation.wikisource.alignment import AcceptPolicy, align_page
-from data_curation.wikisource.segmentation import (
+from pipelines.label.consensus_labelling import graphemes, normalize
+from pipelines.wikisource.alignment import AcceptPolicy, align_page
+from pipelines.wikisource.segmentation import (
     BoxFilter,
     TesseractLayoutSegmenter,
     prepare_page,
@@ -104,7 +104,7 @@ def build_engine(checkpoint: str, vocab_file: str, **kwargs):
     modules declare `max_image_width = 2048`. If you see that label on a 2048px
     checkpoint, you are running the old code.
     """
-    from data_curation.pseudo_labelling.consensus_labelling import build_model_engine
+    from pipelines.label.consensus_labelling import build_model_engine
 
     return build_model_engine(checkpoint=checkpoint, vocab_file=vocab_file, **kwargs)
 
@@ -284,7 +284,7 @@ if __name__ == "__main__":
     SUMMARY_JSON = "data/wikisource_experiment/summary.json"
 
     # ---- the chosen configuration ----
-    VOCAB = "src/text_decoder/grapheme_tokenizer/telugu-vocab.json"
+    VOCAB = "src/telugu_ocr/tokenizer/assets/telugu-vocab.json"
     CHECKPOINT = "models/image_encoder/ctc_encoder_stage-3/ctc-encoder-2048/final_model.pt"
 
     BOX_FILTER = BoxFilter(min_height=12, min_width=40, max_height_frac=0.25,

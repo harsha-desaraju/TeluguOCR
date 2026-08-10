@@ -1,5 +1,15 @@
 # Component inventory — what is duplicated, what has drifted, what is canonical
 
+> **Paths in this document are PRE-REFACTOR and deliberately left that way.** It is a dated
+> record of the state phase 0 measured, and several of its claims are about files at their
+> old locations (e.g. "`src/image_encoder/train.py` — removed"); rewriting the paths would
+> make those claims false. Phase 1 moved everything and phase 2 rewrote the references
+> everywhere else. Translate with: `src/image_encoder/model.py` →
+> `src/telugu_ocr/models/image_encoder.py`, `src/image_encoder/utils.py` →
+> `src/telugu_ocr/data/preprocess.py`, `src/text_decoder/grapheme_tokenizer/tokenizer.py` →
+> `src/telugu_ocr/tokenizer/grapheme.py`, `src/*/train*.py` →
+> `src/telugu_ocr/training/loops/`, `data_curation/` → `pipelines/`.
+
 Phase 0 of the package refactor. This file answers the one question the refactor cannot
 proceed without: **when N copies of a component become one, which copy is correct?**
 

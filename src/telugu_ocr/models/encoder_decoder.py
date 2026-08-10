@@ -4,10 +4,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from src.image_encoder.model import CTCEncoderConfig, ImageEncoderCTC
-from src.text_decoder.model import GPTModel, GPTConfig, MultiHeadAttention, SwiGLU, calculate_positional_encodings
+from src.telugu_ocr.models.image_encoder import CTCEncoderConfig, ImageEncoderCTC
+from src.telugu_ocr.models.text_decoder import GPTModel, GPTConfig, MultiHeadAttention, SwiGLU, calculate_positional_encodings
 from transformers.modeling_outputs import CausalLMOutput
-from src.text_decoder.grapheme_tokenizer.tokenizer import TeluguGraphemeTokenizer
+from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 
 
 
@@ -236,7 +236,7 @@ class EncoderDecoder(nn.Module):
 
 if __name__ == '__main__':
 
-    tokenizer = TeluguGraphemeTokenizer(vocab_file="/Users/xai/Personal/Projects/TeluguOCR/src/text_decoder/grapheme_tokenizer/telugu-vocab.json")
+    tokenizer = TeluguGraphemeTokenizer(vocab_file="/Users/xai/Personal/Projects/TeluguOCR/src/telugu_ocr/tokenizer/assets/telugu-vocab.json")
     print(tokenizer.pad_token_id)
 
 

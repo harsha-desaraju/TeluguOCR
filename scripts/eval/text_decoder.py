@@ -2,8 +2,8 @@
 
 import torch
 from safetensors.torch import  load_file
-from src.text_decoder.grapheme_tokenizer.tokenizer import TeluguGraphemeTokenizer
-from src.text_decoder.model import GPTConfig, GPTModel
+from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
+from src.telugu_ocr.models.text_decoder import GPTConfig, GPTModel
 from typing import Optional
 import torch.nn.functional as F
 
@@ -74,7 +74,7 @@ def sample_generate(
 
 if __name__ == '__main__':
     tokenizer = TeluguGraphemeTokenizer(
-        vocab_file="/Users/xai/Personal/Projects/TeluguOCR/src/text_decoder/grapheme_tokenizer/telugu-vocab.json")
+        vocab_file="/Users/xai/Personal/Projects/TeluguOCR/src/telugu_ocr/tokenizer/assets/telugu-vocab.json")
     print(len(tokenizer))
 
     model_config = GPTConfig(

@@ -20,7 +20,7 @@ import json
 import random
 from pathlib import Path
 
-TELUGU_FONT = "data_curation/text_line_images/fonts/NotoSansTelugu_Condensed-Regular.ttf"
+TELUGU_FONT = "pipelines/synth/fonts/NotoSansTelugu_Condensed-Regular.ttf"
 
 PAGE = """<!DOCTYPE html>
 <html lang="te">

@@ -47,7 +47,7 @@ TWO TESSERACT SETTINGS THAT MATTER FOR LINE CROPS
 ======================================================================================
 RUNNING
 ======================================================================================
-    python3 -m data_curation.pseudo_labelling.single_engine_labelling
+    python3 -m pipelines.label.single_engine_labelling
 
 Tesseract needs its BINARY and the Telugu language data, not just the pip wheel:
     Kaggle / Debian / Ubuntu:  !apt-get -qq install -y tesseract-ocr tesseract-ocr-tel

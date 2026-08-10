@@ -11,13 +11,13 @@ WHY THEY ARE SEPARATE DATASETS
     `accepted` flag means that model agreed with the alignment. Any benchmark scored
     against those labels hands our model an advantage no other engine gets. The eval set
     has no such circularity: a person compared the text to the image in
-    annotation/ocr_correction_tool.py.
+    tools/annotation/ocr_correction_tool.py.
 
 Both push crops that are already in encoder form (grayscale, height 64, width a multiple
 of 8), so training and eval can consume them without re-preprocessing. Both need HF_TOKEN
 (env var, .env, or Kaggle secret) -- see hf_login in scrape.py.
 
-    python3 -m data_curation.wikisource.push_to_hub
+    python3 -m pipelines.wikisource.push_to_hub
 
 ======================================================================================
 TRAIN  --  data/wikisource_lines/lines.jsonl  ->  telugu-wikisource-text-images
@@ -95,7 +95,7 @@ from datasets import Dataset, Features, Value
 from datasets import Image as HFImage
 from PIL import Image
 
-from data_curation.wikisource.scrape import hf_login
+from pipelines.wikisource.scrape import hf_login
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

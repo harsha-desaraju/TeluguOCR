@@ -2,8 +2,8 @@
 #
 # One Unicode grapheme cluster (regex \X) -> one token; no BPE. vocab_size in every model
 # config must equal len(tokenizer), so changing this vocab invalidates every checkpoint.
-target: src.text_decoder.grapheme_tokenizer.tokenizer.TeluguGraphemeTokenizer
-vocab_file: src/text_decoder/grapheme_tokenizer/telugu-vocab.json
+target: src.telugu_ocr.tokenizer.grapheme.TeluguGraphemeTokenizer
+vocab_file: src/telugu_ocr/tokenizer/assets/telugu-vocab.json
 # Recorded so a vocab swap is loud rather than silent -- these are asserted by
 # tests/test_checkpoint_compat.py.
 expected:

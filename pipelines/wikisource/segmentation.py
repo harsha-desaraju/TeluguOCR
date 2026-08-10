@@ -134,7 +134,7 @@ def preprocess_line(img: Image.Image, height: int = 64, max_width: int = 2048,
     """A line crop in the form the encoder consumes: grayscale uint8, fixed height,
     width padded to a multiple of `downsample`.
 
-    Mirrors ImagePreprocessor in src/image_encoder/utils.py, including the over-wide
+    Mirrors ImagePreprocessor in src/telugu_ocr/data/preprocess.py, including the over-wide
     branch: past `max_width` the scale is driven by width instead and the height
     shortfall is padded, rather than squashing the glyphs horizontally. Getting that
     wrong is silent -- the model just reads badly -- so keep it in sync.

@@ -84,11 +84,11 @@ class ImagePreprocessor:
 
 
 # ============================================================================
-# Image augmentation — INLINED from data_curation/text_line_images/image_augmentation.py
+# Image augmentation — INLINED from src/telugu_ocr/data/augment.py
 # ============================================================================
 # CHANGED(2048): the sweep-style augmenter (one effect per image, chosen by a
 # utility/time weighting) is replaced by the calibrated COMPOSED degradation pipeline
-# from data_curation/text_line_images/image_augmentation.py — tuned so the augmented
+# from src/telugu_ocr/data/augment.py — tuned so the augmented
 # distribution CONTAINS the real PDF-crop distribution measured at h=64. It composes
 # many effects per sample (bilevel -> ink -> paper/grime -> tone -> crop artefacts ->
 # geometry -> noise -> resample -> compression -> auto-levels) with a two-sided

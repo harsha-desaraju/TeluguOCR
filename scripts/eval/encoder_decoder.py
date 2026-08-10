@@ -21,7 +21,7 @@ against the human-reviewed reference:
 CER here is code-point Levenshtein / reference length (same convention as the
 training-run CER logs), aggregated corpus-wide (sum of edits / sum of ref lengths).
 
-Run from the repo root:  .venv/bin/python3 -m src.encoder_decoder.test_model
+Run from the repo root:  .venv/bin/python3 -m scripts.eval.encoder_decoder
 All knobs live in the CONFIG block of __main__.
 """
 
@@ -35,10 +35,10 @@ import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 
-from src.encoder_decoder.model import EncoderDecoder
-from src.image_encoder.model import CTCEncoderConfig
-from src.text_decoder.model import GPTConfig
-from src.text_decoder.grapheme_tokenizer.tokenizer import TeluguGraphemeTokenizer
+from src.telugu_ocr.models.encoder_decoder import EncoderDecoder
+from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
+from src.telugu_ocr.models.text_decoder import GPTConfig
+from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 
 
 # ============================================================================
@@ -216,7 +216,7 @@ if __name__ == "__main__":
     # <-- point at the stage-2 checkpoint downloaded from Kaggle
     #     (.pt state dict or a checkpoint dir's model.safetensors)
     CKPT_PATH = f"{ROOT}/models/encoder_decoder/results_stage_2_mid/telugu-ocr-stage2/checkpoint-34000/model.safetensors"
-    VOCAB_FILE = f"{ROOT}/src/text_decoder/grapheme_tokenizer/telugu-vocab.json"
+    VOCAB_FILE = f"{ROOT}/src/telugu_ocr/tokenizer/assets/telugu-vocab.json"
 
     DATA_DIR = f"{ROOT}/data/wikisource_lines_eval"
     LABELS_FILE = f"{DATA_DIR}/lines_corrected.jsonl"   # human-reviewed references

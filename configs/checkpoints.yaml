@@ -24,7 +24,7 @@ checkpoints:
   ctc_encoder_2048:
     path: models/image_encoder/ctc_encoder_stage-2/ctc-encoder-2048/model.safetensors
     model: configs/models/ctc_encoder_2048.yaml
-    trained_by: src/image_encoder/train_ctc_encoder.py
+    trained_by: src/telugu_ocr/training/loops/ctc.py
     train_config: configs/train/ctc_encoder_2048.yaml
     notes: >-
       Stage-2 CTC encoder, widened from 128 to 256 position frames (1024px -> 2048px).
@@ -36,7 +36,7 @@ checkpoints:
   gpt_decoder:
     path: models/text_decoder/telugu-grapheme-gpt/final_model.pt
     model: configs/models/gpt_decoder_512x16.yaml
-    trained_by: src/text_decoder/train.py
+    trained_by: src/telugu_ocr/training/loops/decoder_lm.py
     train_config: configs/train/decoder_lm.yaml
     notes: >-
       Causal grapheme LM used to initialise the encoder-decoder's decoder. 16 blocks;
@@ -45,7 +45,7 @@ checkpoints:
   encoder_decoder_stage1:
     path: models/encoder_decoder/stage-1/telugu-ocr-stage1/model.safetensors
     model: configs/models/encoder_decoder_stage1.yaml
-    trained_by: src/encoder_decoder/train_stage_1.py
+    trained_by: src/telugu_ocr/training/loops/encdec_stage1.py
     train_config: configs/train/encdec_stage1.yaml
     notes: >-
       Stage 1 freezes the pretrained encoder and decoder and trains only the new
@@ -56,5 +56,5 @@ checkpoints:
 #  encoder_decoder_stage2:
 #    path: models/encoder_decoder/stage-2/...
 #    model: configs/models/encoder_decoder_stage1.yaml   # same architecture as stage 1
-#    trained_by: src/encoder_decoder/train_stage_2.py
+#    trained_by: src/telugu_ocr/training/loops/encdec_stage2.py
 #    train_config: configs/train/encdec_stage2.yaml

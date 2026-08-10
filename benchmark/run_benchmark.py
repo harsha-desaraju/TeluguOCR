@@ -8,7 +8,7 @@ WHAT IS MEASURED
 THE REFERENCES
     A HuggingFace dataset -- by default harsha-desaraju/telugu-line-ocr-bench, split
     "test". Every row is a line crop whose transcription a human checked against the
-    image, published by data_curation/wikisource/push_to_hub.py (WHICH="eval").
+    image, published by pipelines/wikisource/push_to_hub.py (WHICH="eval").
 
     Using the Hub copy rather than the local working directory means the benchmark is
     pinned to a published, versioned artifact: a result can be reproduced by anyone,
@@ -33,7 +33,7 @@ FAIRNESS RULES
     * Everything is scored on NFC-normalized, whitespace-collapsed text, so an engine is
       not punished for spacing conventions instead of character errors. `cer_raw`
       (whitespace-stripped only) is reported alongside because that is what
-      src/encoder_decoder/test_model.py prints, keeping past runs comparable.
+      scripts/eval/encoder_decoder.py prints, keeping past runs comparable.
     * Rates are corpus-aggregated: sum(errors) / sum(reference lengths), NOT the mean of
       per-line rates -- a 4-character line otherwise weighs as much as an 80-character
       one.
@@ -69,7 +69,7 @@ from datasets import load_dataset
 
 from benchmark.engines import build_engine
 from benchmark.metrics import EMPTY, score_pairs
-from src.encoder_decoder.test_model import edit_distance
+from scripts.eval.encoder_decoder import edit_distance
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ def load_bench(repo, split, token=None):
     """The published benchmark split from the Hub.
 
     Deduplication, empty-text removal and the human-verified filter all happened when
-    the dataset was built (data_curation/wikisource/push_to_hub.py, WHICH="eval"), so
+    the dataset was built (pipelines/wikisource/push_to_hub.py, WHICH="eval"), so
     nothing is re-derived here -- the published rows ARE the reference set. The guards in
     select_samples remain only for things a consumer must still decide, like whether a
     given engine can encode a given image.
@@ -190,7 +190,7 @@ def score(predictions, references):
     """Error rates at three units, the edit-op breakdown, and confusion pairs.
 
     `cer_raw` is kept alongside the normalized rates because it is the number
-    src/encoder_decoder/test_model.py prints (whitespace-stripped, no NFC), so past
+    scripts/eval/encoder_decoder.py prints (whitespace-stripped, no NFC), so past
     eval_results.json runs stay comparable. Everything else is on normalized text.
     """
     levels = score_pairs(predictions, references)
@@ -371,12 +371,12 @@ if __name__ == "__main__":
 
     # ------------------------------- CONFIG -------------------------------
     # The published benchmark split (built by
-    # data_curation/wikisource/push_to_hub.py (WHICH="eval") from the hand-corrected lines).
+    # pipelines/wikisource/push_to_hub.py (WHICH="eval") from the hand-corrected lines).
     DATASET_REPO = "harsha-desaraju/telugu-line-ocr-bench"
     SPLIT = "test"
     HF_TOKEN = None       # None uses the cached login / HF_TOKEN env var; public repo
 
-    VOCAB_FILE = f"{ROOT}/src/text_decoder/grapheme_tokenizer/telugu-vocab.json"
+    VOCAB_FILE = f"{ROOT}/src/telugu_ocr/tokenizer/assets/telugu-vocab.json"
     CKPT = (f"{ROOT}/models/encoder_decoder/results_stage_2_mid/telugu-ocr-stage2/"
             f"checkpoint-34000/model.safetensors")
 

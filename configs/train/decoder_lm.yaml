@@ -1,5 +1,5 @@
 # Training run that produced checkpoint `gpt_decoder`: causal grapheme LM pretraining.
-# Extracted from the __main__ block of src/text_decoder/train.py.
+# Extracted from the __main__ block of src/telugu_ocr/training/loops/decoder_lm.py.
 #
 # That script's __main__ carries far fewer explicit knobs than the other three -- most of
 # the schedule is left to HuggingFace TrainingArguments defaults rather than being named.

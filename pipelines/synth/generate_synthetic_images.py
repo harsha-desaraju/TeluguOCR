@@ -20,7 +20,7 @@ print(result)
 
 
 # Fonts uploaded as a Kaggle dataset (same layout as image-generation.ipynb).
-FONTS_DIR = "/Users/xai/Personal/Projects/TeluguOCR/data_curation/text_line_images/fonts"
+FONTS_DIR = "/Users/xai/Personal/Projects/TeluguOCR/pipelines/synth/fonts"
 
 rejected_fonts = ['Pothana2000', 'ponnala', 'Lohit_Telugu', 'Vemana']
 danda_non_support_fonts = ["Manu_Bold", "hind-guntur", "Deva_Normal",
@@ -94,7 +94,7 @@ def generate_image(text, font_path, font_size: int = 40, margin: int = 5,
 
 
 # --------------------------------------------------------------------------------------
-# Image preprocessing for the encoder (from src/image_encoder/utils.py), WITHOUT the
+# Image preprocessing for the encoder (from src/telugu_ocr/data/preprocess.py), WITHOUT the
 # final tensor conversion: grayscale -> resize to `image_height` (aspect-preserving,
 # capped at `max_image_width`) -> pad width to the nearest multiple of `patch_size`
 # (fill=255). Returns a PIL.Image; the ToTensor + Normalize step is intentionally omitted.

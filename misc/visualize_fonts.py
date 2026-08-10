@@ -122,7 +122,7 @@ def visualize_fonts(
 
 
 if __name__ == "__main__":
-    folder_path = "/Users/xai/Personal/Projects/TeluguOCR/data_curation/text_line_images/fonts"
+    folder_path = "/Users/xai/Personal/Projects/TeluguOCR/pipelines/synth/fonts"
     save_dir = None  # set to a folder path to also save each figure as a PNG
 
     visualize_fonts(folder_path, save_dir=save_dir)

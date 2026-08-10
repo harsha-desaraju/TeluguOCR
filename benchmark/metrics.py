@@ -6,9 +6,9 @@ THREE UNITS, THREE ERROR RATES
     corpus-wide as sum(errors) / sum(reference lengths).
 
       CER  Unicode code points. The conventional number, and what
-           src/encoder_decoder/test_model.py reports, so results stay comparable.
+           scripts/eval/encoder_decoder.py reports, so results stay comparable.
       AER  Akshara (grapheme cluster) error rate -- split with `regex.\\X`, the SAME
-           definition src/text_decoder/grapheme_tokenizer/tokenizer.py uses, so one
+           definition src/telugu_ocr/tokenizer/grapheme.py uses, so one
            akshara here is exactly one token to the model.
       WER  Whitespace-delimited words.
 

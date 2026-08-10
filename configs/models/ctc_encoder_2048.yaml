@@ -1,6 +1,6 @@
 # CTCEncoderConfig for the trained 2048px CTC image encoder.
 #
-# VERIFIED: these values make src.image_encoder.model.ImageEncoderCTC load
+# VERIFIED: these values make src.telugu_ocr.models.image_encoder.ImageEncoderCTC load
 # models/image_encoder/ctc_encoder_stage-2/ctc-encoder-2048/model.safetensors with
 # strict=True (149 tensors, no missing/unexpected keys, no shape mismatches).
 #
@@ -11,8 +11,8 @@
 # ever changed. The checkpoint carries pos_embed of shape (1, 256, 384) -- 256 frames --
 # which is what max_frames=256 / max_image_width=2048 produces.
 kind: ctc_encoder
-target: src.image_encoder.model.ImageEncoderCTC
-config_class: src.image_encoder.model.CTCEncoderConfig
+target: src.telugu_ocr.models.image_encoder.ImageEncoderCTC
+config_class: src.telugu_ocr.models.image_encoder.CTCEncoderConfig
 config:
   # ---- input ----
   image_height: 64            # fixed by the positional design; collators assume it

@@ -35,7 +35,7 @@ ENGINES
                         "joint" -- beam n-best rescored by
                                    lam*logP_ctc + (1-lam)*logP_attn
                       The decoding itself is imported from
-                      src/encoder_decoder/test_model.py rather than re-implemented, so
+                      scripts/eval/encoder_decoder.py rather than re-implemented, so
                       this benchmark and that script cannot drift apart.
 """
 
@@ -370,7 +370,7 @@ class TeluguOCREngine(OCREngine):
                logP_ctc from the CTC forward algorithm over the SAME encoder frames.
 
     One encoder forward feeds whichever decoders are needed, exactly as in
-    src/encoder_decoder/test_model.py -- whose `preprocess_image`, `ctc_greedy_ids`,
+    scripts/eval/encoder_decoder.py -- whose `preprocess_image`, `ctc_greedy_ids`,
     `beam_search` and `ctc_hyp_logprobs` are imported rather than copied, so this
     benchmark reports the same numbers that script does.
 
@@ -391,10 +391,10 @@ class TeluguOCREngine(OCREngine):
                  max_image_width: int = 2048, max_frames: int = 256):
         import torch
 
-        from src.encoder_decoder.model import EncoderDecoder
-        from src.image_encoder.model import CTCEncoderConfig
-        from src.text_decoder.model import GPTConfig
-        from src.text_decoder.grapheme_tokenizer.tokenizer import TeluguGraphemeTokenizer
+        from src.telugu_ocr.models.encoder_decoder import EncoderDecoder
+        from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
+        from src.telugu_ocr.models.text_decoder import GPTConfig
+        from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 
         if decode not in ("ctc", "beam", "joint"):
             raise ValueError(f"decode must be ctc|beam|joint, got {decode!r}")
@@ -411,7 +411,7 @@ class TeluguOCREngine(OCREngine):
         self.tokenizer = TeluguGraphemeTokenizer(vocab_file=vocab_file)
 
         # Configs must match what stage-2 trained with or the strict load below rejects
-        # the checkpoint (see src/encoder_decoder/train_stage_2.py).
+        # the checkpoint (see src/telugu_ocr/training/loops/encdec_stage2.py).
         decoder_config = GPTConfig(
             vocab_size=len(self.tokenizer), embed_dim=embed_dim, hidden_dim=hidden_dim,
             num_heads=num_heads, num_layers=num_layers, ctx_len=ctx_len, dropout=0.0)
@@ -442,7 +442,7 @@ class TeluguOCREngine(OCREngine):
     def _transcribe(self, images: list[Image.Image]) -> list[str]:
         import torch
 
-        from src.encoder_decoder.test_model import (
+        from scripts.eval.encoder_decoder import (
             beam_search, ctc_greedy_ids, ctc_hyp_logprobs, preprocess_image,
         )
 

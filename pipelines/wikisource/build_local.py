@@ -6,8 +6,8 @@ writes line crops plus a JSONL of labels and scores. Unlike the Kaggle file this
 imports from the package rather than inlining everything, so there is one copy of the
 logic to maintain and this file stays short.
 
-    python3 -m data_curation.wikisource.scrape         # MODE="full", REPO=None
-    python3 -m data_curation.wikisource.build_local
+    python3 -m pipelines.wikisource.scrape         # MODE="full", REPO=None
+    python3 -m pipelines.wikisource.build_local
 
 PARALLELISM
     The bottleneck is tesseract layout analysis: CPU-bound, and roughly ten times the
@@ -58,9 +58,9 @@ import cv2
 from PIL import Image
 from tqdm.auto import tqdm
 
-from data_curation.wikisource.alignment import AcceptPolicy, align_page
-from data_curation.wikisource.experiment import Page, build_engine, load_pages
-from data_curation.wikisource.scrape import (
+from pipelines.wikisource.alignment import AcceptPolicy, align_page
+from pipelines.wikisource.experiment import Page, build_engine, load_pages
+from pipelines.wikisource.scrape import (
     fetch_image_bytes,
     fetch_text,
     iter_category_pages,
@@ -69,7 +69,7 @@ from data_curation.wikisource.scrape import (
     slugify,
     title_from_url,
 )
-from data_curation.wikisource.segmentation import (
+from pipelines.wikisource.segmentation import (
     BoxFilter,
     TesseractLayoutSegmenter,
     encode_jpeg,
@@ -447,7 +447,7 @@ if __name__ == "__main__":
     LIMIT_PAGES = 40000                      # int for a smoke test
 
     # ---- model ----
-    VOCAB = "src/text_decoder/grapheme_tokenizer/telugu-vocab.json"
+    VOCAB = "src/telugu_ocr/tokenizer/assets/telugu-vocab.json"
     CHECKPOINT = "models/image_encoder/ctc_encoder_stage-3/ctc-encoder-2048/final_model.pt"
 
     CONFIG = {

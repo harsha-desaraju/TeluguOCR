@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from rapidfuzz.distance import Levenshtein
 
-from data_curation.pseudo_labelling.consensus_labelling import (
+from pipelines.label.consensus_labelling import (
     cer,
     english_frac,
     graphemes,

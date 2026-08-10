@@ -1,5 +1,5 @@
 # Training run that produced checkpoint `ctc_encoder_2048`.
-# Extracted verbatim from the __main__ block of src/image_encoder/train_ctc_encoder.py.
+# Extracted verbatim from the __main__ block of src/telugu_ocr/training/loops/ctc.py.
 # Recorded, not yet consumed: the script still holds its own copy. Wiring the loop to read
 # this file is Phase 3 of the refactor.
 model: configs/models/ctc_encoder_2048.yaml

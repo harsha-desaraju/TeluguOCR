@@ -32,8 +32,8 @@ Key design points:
     ``train_ctc_encoder_2048.py`` for the streaming variant (use that when the pool
     doesn't fit on disk).
 
-Run (single GPU / CPU):   python3 -m src.image_encoder.train_ctc_encoder_2048_normal
-Run (multi-GPU DDP):      torchrun --nproc_per_node=<N> -m src.image_encoder.train_ctc_encoder_2048_normal
+Run (single GPU / CPU):   python3 -m src.telugu_ocr.models.image_encoder_normal
+Run (multi-GPU DDP):      torchrun --nproc_per_node=<N> -m src.telugu_ocr.models.image_encoder_normal
 """
 
 from __future__ import annotations
@@ -418,11 +418,11 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
 
 
 # ============================================================================
-# Image augmentation — INLINED from data_curation/text_line_images/image_augmentation.py
+# Image augmentation — INLINED from src/telugu_ocr/data/augment.py
 # ============================================================================
 # CHANGED(2048): the sweep-style augmenter (one effect per image, chosen by a
 # utility/time weighting) is replaced by the calibrated COMPOSED degradation pipeline
-# from data_curation/text_line_images/image_augmentation.py — tuned so the augmented
+# from src/telugu_ocr/data/augment.py — tuned so the augmented
 # distribution CONTAINS the real PDF-crop distribution measured at h=64. It composes
 # many effects per sample (bilevel -> ink -> paper/grime -> tone -> crop artefacts ->
 # geometry -> noise -> resample -> compression -> auto-levels) with a two-sided

@@ -50,7 +50,7 @@ def _sha(text: str) -> str:
 def build_tokenizer(cfg: dict | None = None):
     """The grapheme tokenizer described by configs/tokenizer.yaml."""
     cfg = cfg or load_yaml("configs/tokenizer.yaml")
-    from src.text_decoder.grapheme_tokenizer.tokenizer import TeluguGraphemeTokenizer
+    from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 
     return TeluguGraphemeTokenizer(vocab_file=str(REPO_ROOT / cfg["vocab_file"]))
 
@@ -63,19 +63,19 @@ def build_model(model_cfg: dict, tokenizer):
     kind = model_cfg["kind"]
 
     if kind == "ctc_encoder":
-        from src.image_encoder.model import CTCEncoderConfig, ImageEncoderCTC
+        from src.telugu_ocr.models.image_encoder import CTCEncoderConfig, ImageEncoderCTC
 
         return ImageEncoderCTC(CTCEncoderConfig(**model_cfg["config"]))
 
     if kind == "gpt_decoder":
-        from src.text_decoder.model import GPTConfig, GPTModel
+        from src.telugu_ocr.models.text_decoder import GPTConfig, GPTModel
 
         return GPTModel(GPTConfig(**model_cfg["config"]), pad_index=tokenizer.pad_token_id)
 
     if kind == "encoder_decoder":
-        from src.encoder_decoder.model import EncoderDecoder
-        from src.image_encoder.model import CTCEncoderConfig
-        from src.text_decoder.model import GPTConfig
+        from src.telugu_ocr.models.encoder_decoder import EncoderDecoder
+        from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
+        from src.telugu_ocr.models.text_decoder import GPTConfig
 
         enc = load_yaml(model_cfg["encoder"])
         dec = load_yaml(model_cfg["decoder"])

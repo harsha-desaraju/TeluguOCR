@@ -1085,14 +1085,17 @@ if __name__ == "__main__":
 
     # ---- inline arguments ----------------------------------------------------------
     ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-    TOK_DIR = os.path.join(ROOT, "src", "text_decoder", "grapheme_tokenizer")
+    TOK_DIR = os.path.join(ROOT, "src", "telugu_ocr", "tokenizer", "assets")
     DIST_DIR = os.path.join(TOK_DIR, "token_dist")
 
     vocab_file = os.path.join(TOK_DIR, "telugu-vocab.json")
     dist_files = [os.path.join(DIST_DIR, "telugu_grapheme_dist.json"),
                   os.path.join(DIST_DIR, "sanskrit_grapheme_dist.json")]
     english_dist_file = os.path.join(DIST_DIR, "english_grapheme_dist.json")
-    word_file = os.path.join(ROOT, "data_curation", "synthetic",
+    # NOTE(phase-2): this pointed at data_curation/synthetic/, which was gitignored local
+    # data and is now gone. Repointed under the /data/ root to match every other local
+    # artifact; confirm the location if this script is ever run again.
+    word_file = os.path.join(ROOT, "data", "synthetic",
                              "word_image_generator", "vocab.txt")
 
     min_freq = 100          # rare-tail threshold: 100 -> ~8.7k OOV aksharas, 20 -> ~17k
@@ -1217,9 +1220,9 @@ if __name__ == "__main__":
     print(f"  KL(gen || corpus)    {kl:.3f} nats   (uniform would be {uni_kl:.3f})")
 
     # ---- cross-check the token cost against the real tokenizer ---------------------
-    sys.path.insert(0, TOK_DIR)
+    sys.path.insert(0, ROOT)
     try:
-        from tokenizer import TeluguGraphemeTokenizer
+        from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
     except ImportError as exc:                       # transformers not installed
         print(f"\n[skip] tokenizer cross-check: {exc}")
     else:

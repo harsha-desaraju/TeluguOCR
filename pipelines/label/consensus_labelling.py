@@ -62,7 +62,7 @@ THERE IS NO GROUND TRUTH HERE
     this script produces).
 
     Both work over GRAPHEME CLUSTERS rather than codepoints, matching the grapheme
-    tokenizer in src/text_decoder/grapheme_tokenizer: one visual Telugu akshara is
+    tokenizer in src/telugu_ocr/tokenizer: one visual Telugu akshara is
     routinely three or four codepoints, so a codepoint-level distance overstates the
     difference severalfold.
 
@@ -84,7 +84,7 @@ EFFICIENCY
 
 USAGE
     Configure the inline block at the bottom and run:
-        python3 -m data_curation.pseudo_labelling.consensus_labelling
+        python3 -m pipelines.label.consensus_labelling
 
     Every engine is optional and imported lazily; a missing one is skipped with a warning
     (and then no row can be tiered, so they all land in Tier 0). Dependencies:
@@ -566,7 +566,7 @@ def preprocess_for_ctc(img: Image.Image, image_height: int = 64,
     """Grayscale -> height `image_height` (aspect preserved) -> width padded to a multiple
     of `downsample`, white fill. Returns float32 in [-1, 1], shape (1, H, W).
 
-    Mirrors ImagePreprocessor in src/image_encoder/utils.py, including the
+    Mirrors ImagePreprocessor in src/telugu_ocr/data/preprocess.py, including the
     over-wide branch: past `max_image_width` the scale is driven by width instead and the
     height shortfall is padded, rather than squashing the glyphs horizontally. Getting this
     wrong is silent -- the model just reads badly -- so keep it in sync.
@@ -683,10 +683,10 @@ class EncoderDecoderEngine(OCREngine):
                  max_tokens: int = 160, max_pixels_per_batch: int = 64 * 2048 * 8,
                  width_bucket: int = 128, amp: bool = True):
         import torch
-        from src.encoder_decoder.model import EncoderDecoder
-        from src.image_encoder.model import CTCEncoderConfig
-        from src.text_decoder.model import GPTConfig
-        from src.text_decoder.grapheme_tokenizer.tokenizer import TeluguGraphemeTokenizer
+        from src.telugu_ocr.models.encoder_decoder import EncoderDecoder
+        from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
+        from src.telugu_ocr.models.text_decoder import GPTConfig
+        from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 
         self.torch = torch
         self.device = device or ("cuda" if torch.cuda.is_available()
@@ -837,7 +837,7 @@ class TeluguCTCEngine(OCREngine):
                  max_pixels_per_batch: int = 64 * 2048 * 24, width_bucket: int = 128,
                  amp: bool = True):
         import torch
-        from src.text_decoder.grapheme_tokenizer.tokenizer import TeluguGraphemeTokenizer
+        from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 
         # Which width a checkpoint supports is decided by HOW MANY POSITION ROWS it
         # carries, not by whether a `pos_embed_ext` tensor is present. Those two used to
@@ -852,12 +852,19 @@ class TeluguCTCEngine(OCREngine):
         rows = (state["pos_embed"].shape[1]
                 + (state["pos_embed_ext"].shape[1] if "pos_embed_ext" in state else 0))
         self.variant = "2048" if rows >= 256 else "1024"
-        if self.variant == "2048":
-            from src.image_encoder.train_ctc_encoder_2048 import (CTCEncoderConfig,
-                                                                  ImageEncoderCTC)
-        else:
-            from src.image_encoder.train_ctc_encoder import (CTCEncoderConfig,
-                                                             ImageEncoderCTC)
+        # FIXME(phase-3): this engine is broken, and was broken before the refactor.
+        #   1. The "2048" branch used to import src.image_encoder.train_ctc_encoder_2048,
+        #      a module that has never existed in git history or on disk -- so the branch
+        #      that fires for EVERY real checkpoint (all carry 256 position rows) raised
+        #      ModuleNotFoundError. Both branches now point at the canonical module, which
+        #      makes the import resolve but does not make the engine work, because:
+        #   2. `CTCEncoderConfig()` below builds from the DATACLASS DEFAULTS (1024px /
+        #      128 frames). No trained artifact uses those, so _strict_load then fails on
+        #      the shape of pos_embed. The fix is to build from
+        #      configs/models/ctc_encoder_2048.yaml instead of from defaults; that is a
+        #      behaviour change, so it belongs in phase 3, not in this mechanical pass.
+        from src.telugu_ocr.models.image_encoder import (CTCEncoderConfig,
+                                                         ImageEncoderCTC)
         _split = "split" if "pos_embed_ext" in state else "merged"
         print(f"[{self.name}] CTC variant '{self.variant}' "
               f"({rows} position rows, {_split}; max width "
@@ -1501,7 +1508,7 @@ if __name__ == "__main__":
     #               "ctc-encoder-2048/final_model.pt")
     CHECKPOINT = (f"{REPO_ROOT}/models/image_encoder/ctc_encoder/ctc-encoder/"
                   f"checkpoint-152000/model.safetensors")
-    VOCAB_FILE = f"{REPO_ROOT}/src/text_decoder/grapheme_tokenizer/telugu-vocab.json"
+    VOCAB_FILE = f"{REPO_ROOT}/src/telugu_ocr/tokenizer/assets/telugu-vocab.json"
 
     # Chunk size is now also the SAVE granularity: nothing reaches disk until a chunk
     # finishes, so at ~6 rows/s a 512-row chunk means the first save is ~85s in and a
