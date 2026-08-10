@@ -55,7 +55,7 @@ from PIL import Image
 from rapidfuzz.distance import Levenshtein
 from tqdm.auto import tqdm
 
-from data_curation.text_line_images.consensus_labelling import graphemes, normalize
+from data_curation.pseudo_labelling.consensus_labelling import graphemes, normalize
 from data_curation.wikisource.alignment import AcceptPolicy, align_page
 from data_curation.wikisource.segmentation import (
     BoxFilter,
@@ -96,16 +96,15 @@ def load_pages(data_dir, limit=None) -> list[Page]:
 def build_engine(checkpoint: str, vocab_file: str, **kwargs):
     """Load the CTC recogniser used to anchor the alignment.
 
-    One caveat worth knowing, because it prints a misleading line. consensus_labelling
-    picks the model module by sniffing for a `pos_embed_ext` tensor, treating its
-    absence as the old 1024px-wide architecture. The stage-3 checkpoint stores its
-    position table MERGED into a single `pos_embed` of (1, 256, 384), so the sniff
-    misses the extension and announces "CTC variant '1024'". The checkpoint is in fact
-    a full 2048px model, and it does run at 2048px -- both trainer modules now declare
-    `max_image_width = 2048`, so the misidentified branch builds the same thing. Ignore
-    the label; do not rely on it staying harmless.
+    consensus_labelling picks the model module by COUNTING position rows in the
+    checkpoint, so a stage-3 checkpoint that stores its table merged into a single
+    `pos_embed` of (1, 256, 384) is correctly reported as the 2048px variant. An earlier
+    version sniffed for a separate `pos_embed_ext` tensor and announced "CTC variant
+    '1024'" for exactly that checkpoint -- harmless then only because both trainer
+    modules declare `max_image_width = 2048`. If you see that label on a 2048px
+    checkpoint, you are running the old code.
     """
-    from data_curation.text_line_images.consensus_labelling import build_model_engine
+    from data_curation.pseudo_labelling.consensus_labelling import build_model_engine
 
     return build_model_engine(checkpoint=checkpoint, vocab_file=vocab_file, **kwargs)
 
