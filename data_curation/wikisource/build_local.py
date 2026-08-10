@@ -444,7 +444,7 @@ if __name__ == "__main__":
     # processes exactly 51-100 and stops. It follows that re-running with the same
     # limit is a no-op once the range is complete (only previously FAILED pages are
     # retried -- failures are not recorded in pages.jsonl); to build more, raise it.
-    LIMIT_PAGES = 32000                      # int for a smoke test
+    LIMIT_PAGES = 40000                      # int for a smoke test
 
     # ---- model ----
     VOCAB = "src/text_decoder/grapheme_tokenizer/telugu-vocab.json"
