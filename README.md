@@ -112,14 +112,8 @@ not a hard training example.
 
 **Real lines from Wikisource.** Proofread page scans are cut into lines with Tesseract's
 layout analysis, and each line's text is recovered by aligning the page's known transcript
-against a concatenated OCR hypothesis. Two other segmenters were built and measured
-against it:
-
-| segmenter | corpus CER | struct % | yield @0.10 | yield @0.15 |
-|---|---|---|---|---|
-| tesseract layout | 0.556 | 11.2 | **40.3%** | **49.6%** |
-| PP-OCR detection | 0.553 | 10.1 | 34.1% | 46.2% |
-| ink projection | 0.593 | 23.1 | 26.6% | 34.4% |
+against a concatenated OCR hypothesis. This way, generated the ground truth for proofread 
+Wikisource images 
 
 **Pseudo-labelling.** Book scans are transcribed by several engines at once and kept only
 where they agree, with per-line confidence recorded.
@@ -130,7 +124,7 @@ Key datasets on the Hub:
 |---|---|
 | [`telugu-line-ocr-bench`](https://huggingface.co/datasets/harsha-desaraju/telugu-line-ocr-bench) | the human-verified evaluation set used above |
 | [`telugu-wikisource-text-images`](https://huggingface.co/datasets/harsha-desaraju/telugu-wikisource-text-images) | real line crops with aligned transcripts |
-| [`sample-dataset-new`](https://huggingface.co/datasets/harsha-desaraju/sample-dataset-new) | synthetic rendered lines |
+| [`telugu-synthetic-line-images`](https://huggingface.co/datasets/harsha-desaraju/telugu-synthetic-line-images) | synthetic rendered lines |
 | [`telugu-sanskrit-english-text-1024`](https://huggingface.co/datasets/harsha-desaraju/telugu-sanskrit-english-text-1024) | the text corpus behind the LM |
 
 ## Getting started
@@ -216,13 +210,5 @@ intentional and understood — never to silence a failure you have not explained
 
 ## Acknowledgements
 
-Baselines: [Tesseract](https://github.com/tesseract-ocr/tesseract),
-[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR),
-[Surya](https://github.com/VikParuchuri/surya). Degradation effects build on
-[Augraphy](https://github.com/sparkfish/augraphy). Real text and page scans come from
 [Telugu Wikisource](https://te.wikisource.org), whose proofreading volunteers made the
 aligned corpus possible.
-
-## License
-
-[MIT](LICENSE).
