@@ -75,7 +75,7 @@ USAGE
     Call it on the RESIZED 64px-tall crop, not the full-resolution render: the
     scale-dependent parameters (resample scale, blur sigma, band widths, speckle size)
     are all tuned for that height. This matches the ImagePreprocessor in
-    src/telugu_ocr/training/loops/encdec_stage2.py, which augments after the resize.
+    src/telugu_ocr/training/loops/encdec.py (STAGE=2), which augments after the resize.
 
 Verified against augraphy 8.2.6 and OpenCV 5.0. Constructor signatures drift between
 augraphy releases; re-check the parameter names if you upgrade.

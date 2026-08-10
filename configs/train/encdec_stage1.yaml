@@ -1,5 +1,5 @@
 # Training run that produced checkpoint `encoder_decoder_stage1`.
-# Extracted verbatim from the __main__ block of src/telugu_ocr/training/loops/encdec_stage1.py.
+# Extracted verbatim from the __main__ block of src/telugu_ocr/training/loops/encdec.py (STAGE=1).
 # Recorded, not yet consumed -- see configs/train/ctc_encoder_2048.yaml.
 #
 # Stage 1 freezes the pretrained encoder and decoder and trains ONLY the newly added

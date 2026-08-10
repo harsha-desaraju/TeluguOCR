@@ -45,7 +45,7 @@ checkpoints:
   encoder_decoder_stage1:
     path: models/encoder_decoder/stage-1/telugu-ocr-stage1/model.safetensors
     model: configs/models/encoder_decoder_stage1.yaml
-    trained_by: src/telugu_ocr/training/loops/encdec_stage1.py
+    trained_by: src/telugu_ocr/training/loops/encdec.py (STAGE=1)
     train_config: configs/train/encdec_stage1.yaml
     notes: >-
       Stage 1 freezes the pretrained encoder and decoder and trains only the new
@@ -56,5 +56,5 @@ checkpoints:
 #  encoder_decoder_stage2:
 #    path: models/encoder_decoder/stage-2/...
 #    model: configs/models/encoder_decoder_stage1.yaml   # same architecture as stage 1
-#    trained_by: src/telugu_ocr/training/loops/encdec_stage2.py
+#    trained_by: src/telugu_ocr/training/loops/encdec.py (STAGE=2)
 #    train_config: configs/train/encdec_stage2.yaml

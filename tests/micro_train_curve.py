@@ -68,6 +68,14 @@ def small_cfgs(mod, vocab):
     return enc, dec
 
 
+def _resolve(mod, name):
+    """The loop module may import a helper or not re-export it; fall back to the package."""
+    if hasattr(mod, name):
+        return getattr(mod, name)
+    import src.telugu_ocr.training.optim as _o
+    return getattr(_o, name)
+
+
 def run_stage(loop_module: str, stage: int) -> list:
     mod = importlib.import_module(loop_module)
     from tests.model_registry import build_tokenizer
@@ -79,7 +87,10 @@ def run_stage(loop_module: str, stage: int) -> list:
     if stage == 1:
         kw.update(encoder_no_grad=True, ctc_loss_weight=0.0)
     else:
-        kw.update(encoder_no_grad=False, ctc_loss_weight=getattr(mod, "CTC_LOSS_WEIGHT", 0.3))
+        kw.update(encoder_no_grad=False,
+                  ctc_loss_weight=(mod.STAGE_CONFIGS[2]["ctc_loss_weight"]
+                                   if hasattr(mod, "STAGE_CONFIGS")
+                                   else getattr(mod, "CTC_LOSS_WEIGHT", 0.3)))
     model = mod.EncoderDecoder(**kw)
     model.train()
 
@@ -99,16 +110,16 @@ def run_stage(loop_module: str, stage: int) -> list:
 
     # the stage's own optimizer grouping + scheduler
     if stage == 1:
-        opt = mod.build_optimizer(model, lrs=3e-4, weight_decay=0.01, betas=(0.9, 0.95))
-        sched = mod.build_scheduler(opt, warmup_steps=2, total_steps=STEPS, min_lr=1e-5)
+        opt = _resolve(mod, 'build_optimizer')(model, lrs=3e-4, weight_decay=0.01, betas=(0.9, 0.95))
+        sched = _resolve(mod, 'build_scheduler')(opt, warmup_steps=2, total_steps=STEPS, min_lr=1e-5)
     else:
-        tiers = list(mod.LR_TIERS)
-        opt = mod.build_optimizer(model,
+        tiers = list(_resolve(mod, 'LR_TIERS'))
+        opt = _resolve(mod, 'build_optimizer')(model,
                                   lrs={t: lr for t, lr in zip(tiers, (3e-4, 1e-4, 5e-5))},
                                   min_lrs={t: 1e-5 for t in tiers},
                                   weight_decay=0.01, betas=(0.9, 0.95),
-                                  tier_fn=mod._param_tier, tiers=mod.LR_TIERS)
-        sched = mod.build_scheduler(opt, warmup_steps=2, total_steps=STEPS)
+                                  tier_fn=_resolve(mod, '_param_tier'), tiers=_resolve(mod, 'LR_TIERS'))
+        sched = _resolve(mod, 'build_scheduler')(opt, warmup_steps=2, total_steps=STEPS)
 
     losses = []
     for _ in range(STEPS):
@@ -134,7 +145,10 @@ def run_callback(loop_module: str, stage: int) -> dict:
     enc, dec = small_cfgs(mod, len(tok))
     kw = dict(encoder_config=enc, decoder_config=dec, pad_index=tok.pad_token_id)
     kw.update(encoder_no_grad=(stage == 1),
-              ctc_loss_weight=0.0 if stage == 1 else getattr(mod, "CTC_LOSS_WEIGHT", 0.3))
+              ctc_loss_weight=(0.0 if stage == 1 else
+                               (mod.STAGE_CONFIGS[2]["ctc_loss_weight"]
+                                if hasattr(mod, "STAGE_CONFIGS")
+                                else getattr(mod, "CTC_LOSS_WEIGHT", 0.3))))
     model = mod.EncoderDecoder(**kw).eval()
 
     rows = [{"image": r["image"], "text": r["text"]} for r in synth_batch(tok)]
@@ -154,15 +168,11 @@ def run_callback(loop_module: str, stage: int) -> dict:
             for k, v in sorted(out.items())}
 
 
+# Both stages come from one module, selected by STAGE_CONFIGS.
 TARGETS = {
-    "stage1": ("src.telugu_ocr.training.loops.encdec_stage1", 1),
-    "stage2": ("src.telugu_ocr.training.loops.encdec_stage2", 2),
+    "stage1": ("src.telugu_ocr.training.loops.encdec", 1),
+    "stage2": ("src.telugu_ocr.training.loops.encdec", 2),
 }
-if os.environ.get("MERGED"):     # after the merge both stages come from one module
-    TARGETS = {
-        "stage1": ("src.telugu_ocr.training.loops.encdec", 1),
-        "stage2": ("src.telugu_ocr.training.loops.encdec", 2),
-    }
 
 mode = sys.argv[1] if len(sys.argv) > 1 else "capture"
 curves = {}

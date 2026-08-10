@@ -251,7 +251,7 @@ class TeluguOCREngine(OCREngine):
         self.tokenizer = TeluguGraphemeTokenizer(vocab_file=vocab_file)
 
         # Configs must match what stage-2 trained with or the strict load below rejects
-        # the checkpoint (see src/telugu_ocr/training/loops/encdec_stage2.py).
+        # the checkpoint (see src/telugu_ocr/training/loops/encdec.py (STAGE=2)).
         decoder_config = GPTConfig(
             vocab_size=len(self.tokenizer), embed_dim=embed_dim, hidden_dim=hidden_dim,
             num_heads=num_heads, num_layers=num_layers, ctx_len=ctx_len, dropout=0.0)

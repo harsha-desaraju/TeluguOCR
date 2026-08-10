@@ -44,8 +44,11 @@ load → transfer → freeze → sanity-check recipe.
 - `src/telugu_ocr/tokenizer/` — `grapheme.py` + `vocab.py`, with the vocab and grapheme
   distributions under `assets/`.
 - `src/telugu_ocr/data/` — `preprocess.py` (`ImagePreprocessor`) and `augment.py`.
-- `src/telugu_ocr/training/loops/` — `ctc.py`, `decoder_lm.py`, `encdec_stage1.py`,
-  `encdec_stage2.py`. Self-contained scripts (see the duplication note below).
+- `src/telugu_ocr/training/loops/` — `ctc.py`, `decoder_lm.py`, and `encdec.py` (both
+  fine-tuning stages, selected by `STAGE` / `STAGE_CONFIGS`). They import from the
+  package; `scripts/bundle.py` re-inlines one into a standalone file for Kaggle.
+- `src/telugu_ocr/training/` — `optim.py`, `trainer.py`, `callbacks.py`, `checkpoint.py`,
+  `eval_slices.py`; `src/telugu_ocr/engines/` and `metrics/` for OCR engines and scoring.
 - `pipelines/` — data pipelines, by stage: `acquire/` (PDF scraping/downloading),
   `pages/` (PDF→images), `synth/` (synthetic text-line generation + fonts),
   `label/` (pseudo-labelling), `publish/` (push datasets to HF Hub), and
@@ -81,7 +84,7 @@ load → transfer → freeze → sanity-check recipe.
   Install deps with `uv sync`. A `.venv/` is present.
 - Use **`python3`**, not `python` — `python` is not on PATH in this environment.
 - Run scripts from the repo root so `src...` imports resolve, e.g.
-  `python3 -m src.telugu_ocr.training.loops.encdec_stage1` (or run the self-contained inlined
+  `python3 -m src.telugu_ocr.training.loops.encdec` (or run the self-contained inlined
   scripts directly on a GPU host).
 - There is **no configured test runner or linter**. `test_model.py` files are ad-hoc
   eval/visualization scripts, not a test suite.

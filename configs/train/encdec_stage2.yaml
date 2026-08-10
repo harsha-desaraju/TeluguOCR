@@ -1,5 +1,5 @@
 # Stage-2 end-to-end refinement, from the __main__ block of
-# src/telugu_ocr/training/loops/encdec_stage2.py. No stage-2 checkpoint is present locally, so this
+# src/telugu_ocr/training/loops/encdec.py (STAGE=2). No stage-2 checkpoint is present locally, so this
 # entry is currently unverified against any artifact -- add it to configs/checkpoints.yaml
 # once one is downloaded.
 #
