@@ -1,6 +1,8 @@
 
 """Combined Image encoder and Text decoder Model"""
 
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -164,17 +166,36 @@ class TextDecoder(nn.Module):
 
 class EncoderDecoder(nn.Module):
     """An Image encoder and text decoder based transformer model"""
-    def __init__(self, encoder_config: CTCEncoderConfig, decoder_config: GPTConfig, pad_index: int):
+    def __init__(self, encoder_config: CTCEncoderConfig, decoder_config: GPTConfig, pad_index: int,
+                 ctc_loss_weight: float = 0.0, encoder_no_grad: bool = False):
         super().__init__()
         self.encoder_model = ImageEncoderCTC(encoder_config)
         self.decoder_model = TextDecoder(decoder_config, pad_index)
         # Bridge the encoder width (384) to the decoder width (512) so the frame
-        # features can feed the decoder's cross-attention keys/values. Trainable
-        # (the encoder is frozen); a no-op nn.Identity when the widths already match.
+        # features can feed the decoder's cross-attention keys/values. Always trainable;
+        # a no-op nn.Identity when the widths already match.
         if encoder_config.embed_dim != decoder_config.embed_dim:
             self.enc_to_dec = nn.Linear(encoder_config.embed_dim, decoder_config.embed_dim)
         else:
             self.enc_to_dec = nn.Identity()
+
+        # ---- knobs that differ between the two fine-tuning stages -------------------
+        # Both default to the STAGE-1 / inference behaviour, so constructing this class
+        # the way every existing caller does is numerically unchanged.
+        #
+        # encoder_no_grad  stage 1 freezes the encoder; setting this True keeps it out
+        #                  of the autograd graph entirely rather than relying on
+        #                  requires_grad, which saves the activation memory. Stage 2
+        #                  trains end-to-end and leaves it False.
+        # ctc_loss_weight  stage 2 adds the encoder's CTC head as an auxiliary term,
+        #                  loss = CE + w * CTC, to stop the encoder drifting away from
+        #                  the alignment it was pretrained on. 0.0 disables the branch,
+        #                  which is what stage 1 and inference want.
+        self.encoder_no_grad = encoder_no_grad
+        self.ctc_loss_weight = ctc_loss_weight
+        # Latest per-batch loss components, stashed for logging by the trainer.
+        self._ce_loss = None
+        self._ctc_loss = None
 
     @torch.no_grad()
     def generate(self, pixel_values, bos_id, eos_id, max_new_tokens=256, no_repeat_cycle=True,
@@ -216,19 +237,58 @@ class EncoderDecoder(nn.Module):
                     break
         return ids[0].tolist()
 
-    def forward(self, pixel_values, input_ids, input_lengths = None, text_padding_mask=None):
+    def forward(self, pixel_values, input_ids, input_lengths=None, text_padding_mask=None,
+                ctc_labels=None, ctc_label_lengths=None):
         # pixel_values -> (B, 1, H, W); input_lengths -> (B,) valid frames = W_real // downsample
         # encode() returns frame features (B, T, D) and a frame padding mask (True = padded frame).
-        encoder_output, key_padding_mask = self.encoder_model.encode(pixel_values, input_lengths)
-        encoder_output = self.enc_to_dec(encoder_output)         # (B, T, dec_embed_dim)
+        enc_ctx = torch.no_grad() if self.encoder_no_grad else contextlib.nullcontext()
+        with enc_ctx:
+            # RAW encoder features, at the encoder's width (384), BEFORE the bridge. The CTC
+            # head consumes these; the decoder's cross-attention consumes the bridged ones.
+            # Keeping the two separate matters -- the CTC head's weights are in the encoder's
+            # space, so feeding it bridged features would be silently wrong.
+            encoder_output, key_padding_mask = self.encoder_model.encode(pixel_values, input_lengths)
+        bridged = self.enc_to_dec(encoder_output)                # (B, T, dec_embed_dim)
 
         if key_padding_mask is not None:
             # Custom cross-attention expects an SDPA-style mask (True = KEEP), shape (B, 1, 1, T).
             cross_key_mask = (~key_padding_mask).unsqueeze(1).unsqueeze(2)
         else:
             cross_key_mask = None
-        decoder_output = self.decoder_model(input_ids, encoder_output, text_padding_mask, cross_key_mask, None)
-        return decoder_output
+        decoder_output = self.decoder_model(input_ids, bridged, text_padding_mask, cross_key_mask, None)
+
+        # ---- Combined loss: CE (decoder LM) + ctc_loss_weight * CTC (encoder head) ----
+        # Inactive unless BOTH a weight and labels are supplied, so stage 1 and inference
+        # return exactly what they returned before this branch existed.
+        ce_loss = decoder_output.loss
+        total_loss = ce_loss
+        ctc_loss = None
+        if ctc_labels is not None and self.ctc_loss_weight > 0:
+            # CTC head over the raw frame features -> (B, T, C=vocab+1), the same class and
+            # blank space as the standalone CTC encoder. log_softmax in fp32 for CTC
+            # numerical stability under fp16 autocast.
+            ctc_logits = self.encoder_model.ctc_head(encoder_output)
+            log_probs = ctc_logits.float().log_softmax(dim=-1)   # (B, T, C)
+            B, T, _ = log_probs.shape
+            if input_lengths is None:
+                frame_lengths = torch.full((B,), T, dtype=torch.long, device=log_probs.device)
+            else:
+                frame_lengths = input_lengths.to(log_probs.device)
+            ctc_loss = self.encoder_model.ctc_loss(
+                log_probs.permute(1, 0, 2),                      # (T, B, C) as CTCLoss expects
+                ctc_labels,                                      # (B, S) padded grapheme targets
+                frame_lengths,
+                ctc_label_lengths,
+            )
+            total_loss = ce_loss + self.ctc_loss_weight * ctc_loss
+
+        # Stash detached components for logging (no graph retained).
+        self._ce_loss = ce_loss.detach() if ce_loss is not None else None
+        self._ctc_loss = ctc_loss.detach() if ctc_loss is not None else None
+
+        if ctc_loss is None:
+            return decoder_output
+        return CausalLMOutput(loss=total_loss, logits=decoder_output.logits)
 
 
 

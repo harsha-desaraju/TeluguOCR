@@ -82,205 +82,24 @@ from transformers.trainer_utils import get_last_checkpoint
 # ============================================================================
 # Model config (CHANGED(2048) fields flagged)
 # ============================================================================
-@dataclass
-class CTCEncoderConfig:
-    # ---- input ----
-    image_height: int = 64
-    max_image_width: int = 2048     # CHANGED(2048): 1024 -> 2048 (W <= 2048)
-    downsample: int = 8             # T = W // downsample
-    base_frames: int = 128          # CHANGED(2048): rows loaded from the old ckpt (old max)
-    max_frames: int = 256           # CHANGED(2048): 128 -> 256 pos-emb length (T up to 256)
-
-    # ---- conv stem (UNCHANGED strides/channels) ----
-    stem_channels: tuple = (32, 64, 128, 256, 320, 384)
-    num_groups: int = 32
-
-    # ---- transformer encoder (UNCHANGED) ----
-    embed_dim: int = 384
-    num_layers: int = 10
-    num_heads: int = 8
-    mlp_dim: int = 1536
-    dropout: float = 0.05            # UNCHANGED (spec)
-    drop_path_rate: float = 0.1     # UNCHANGED (spec)
-
-    # ---- CTC head (UNCHANGED vocab/blank) ----
-    vocab_size: int = 2048          # blank appended at index vocab_size
+from src.telugu_ocr.models.image_encoder import (CTCEncoderConfig, ConvBlock, ConvStem,
+                                                DropPath, ImageEncoderCTC, TransformerBlock)
 
 
 # ============================================================================
 # Building blocks (UNCHANGED)
 # ============================================================================
-class ConvBlock(nn.Module):
-    """Conv -> GroupNorm -> GELU."""
-
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, num_groups):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
-        groups = num_groups if out_channels % num_groups == 0 else 1
-        self.norm = nn.GroupNorm(groups, out_channels)
-        self.act = nn.GELU()
-
-    def forward(self, x):
-        return self.act(self.norm(self.conv(x)))
 
 
-class ConvStem(nn.Module):
-    """Six-block convolutional tokenizer: (B,1,64,W) -> (B, T=W/8, 384). UNCHANGED."""
-
-    def __init__(self, cfg: CTCEncoderConfig):
-        super().__init__()
-        c = cfg.stem_channels
-        assert len(c) == 6 and c[-1] == cfg.embed_dim
-        specs = [
-            ((3, 3), (2, 2), (1, 1)),  # 32×32×W/2
-            ((3, 3), (2, 2), (1, 1)),  # 64×16×W/4
-            ((3, 3), (2, 1), (1, 1)),  # 128×8×W/4
-            ((3, 3), (2, 2), (1, 1)),  # 256×4×W/8
-            ((3, 3), (2, 1), (1, 1)),  # 320×2×W/8
-            ((2, 1), (2, 1), (0, 0)),  # 384×1×W/8
-        ]
-        in_ch, blocks = 1, []
-        for out_ch, (k, s, p) in zip(c, specs):
-            blocks.append(ConvBlock(in_ch, out_ch, k, s, p, cfg.num_groups))
-            in_ch = out_ch
-        self.blocks = nn.ModuleList(blocks)
-
-    def forward(self, x):
-        for block in self.blocks:
-            x = block(x)
-        B, D, H, T = x.shape
-        assert H == 1, f"conv stem did not collapse height to 1 (got {H})"
-        return x.squeeze(2).transpose(1, 2)  # (B, T, D)
 
 
-class DropPath(nn.Module):
-    """Stochastic depth (UNCHANGED)."""
-
-    def __init__(self, drop_prob: float = 0.0):
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, x):
-        if self.drop_prob == 0.0 or not self.training:
-            return x
-        keep = 1.0 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        mask = x.new_empty(shape).bernoulli_(keep)
-        return x / keep * mask
 
 
-class TransformerBlock(nn.Module):
-    """Pre-LN transformer block (UNCHANGED)."""
-
-    def __init__(self, cfg: CTCEncoderConfig, drop_path: float):
-        super().__init__()
-        self.layer_norm1 = nn.LayerNorm(cfg.embed_dim)
-        self.attention = nn.MultiheadAttention(
-            cfg.embed_dim, cfg.num_heads, dropout=cfg.dropout, batch_first=True
-        )
-        self.layer_norm2 = nn.LayerNorm(cfg.embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(cfg.embed_dim, cfg.mlp_dim), nn.GELU(), nn.Dropout(cfg.dropout),
-            nn.Linear(cfg.mlp_dim, cfg.embed_dim), nn.Dropout(cfg.dropout),
-        )
-        self.drop_path = DropPath(drop_path)
-
-    def forward(self, x, key_padding_mask=None):
-        norm_x = self.layer_norm1(x)
-        attn_out, _ = self.attention(norm_x, norm_x, norm_x,
-                                     key_padding_mask=key_padding_mask, need_weights=False)
-        x = x + self.drop_path(attn_out)
-        x = x + self.drop_path(self.mlp(self.layer_norm2(x)))
-        return x
 
 
 LABEL_PAD_ID = -100
 
 
-class ImageEncoderCTC(nn.Module):
-    """Conv stem -> transformer -> CTC head. Returns {"loss","logits"} for HF Trainer.
-
-    The learned positional embedding is a SINGLE ``pos_embed`` (1, max_frames, D),
-    sliced to T in forward. (It was previously split into ``pos_embed`` + ``pos_embed_ext``
-    so the extension rows could take a higher LR while extending the context window; now
-    that training is finished it is one table. ``load_checkpoint`` merges an old split
-    checkpoint into it row-for-row, so no weights change.)
-    """
-
-    def __init__(self, cfg: CTCEncoderConfig, label_pad_id: int = LABEL_PAD_ID):
-        super().__init__()
-        self.cfg = cfg
-        self.blank_id = cfg.vocab_size           # UNCHANGED blank index
-        self.num_classes = cfg.vocab_size + 1
-        self.label_pad_id = label_pad_id
-
-        self.stem = ConvStem(cfg)
-
-        # Single learned positional embedding of the full length. Training is done, so
-        # the base/extension split (two Parameters, concatenated in forward) has served
-        # its purpose and is collapsed into one table. `load_checkpoint` merges an old
-        # split checkpoint into this table, so the trained weights transfer exactly.
-        self.pos_embed = nn.Parameter(torch.zeros(1, cfg.max_frames, cfg.embed_dim))
-
-        self.dropout = nn.Dropout(cfg.dropout)
-        dpr = torch.linspace(0.0, cfg.drop_path_rate, cfg.num_layers).tolist()
-        self.blocks = nn.ModuleList([TransformerBlock(cfg, dpr[i]) for i in range(cfg.num_layers)])
-        self.layer_norm = nn.LayerNorm(cfg.embed_dim)
-        self.ctc_head = nn.Linear(cfg.embed_dim, self.num_classes)
-        self.ctc_loss = nn.CTCLoss(blank=self.blank_id, zero_infinity=True)  # UNCHANGED
-
-        self._init_weights()
-
-    def _init_weights(self):
-        # Same std as the original init; the whole table is overwritten by the
-        # checkpoint load in load_checkpoint.
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-
-    def _pos(self, T):
-        return self.pos_embed[:, :T, :]
-
-    def forward(self, images, input_lengths=None, labels=None, label_lengths=None):
-        feats = self.stem(images)                       # (B, T, D)
-        B, T, D = feats.shape
-        # fail-fast tripwire if a stray line wider than max_frames*downsample slips in.
-        assert T <= self.cfg.max_frames, f"T={T} exceeds max_frames={self.cfg.max_frames}"
-        feats = feats + self._pos(T)
-        feats = self.dropout(feats)
-
-        if input_lengths is None:
-            input_lengths = torch.full((B,), T, dtype=torch.long, device=feats.device)
-
-        frame_idx = torch.arange(T, device=feats.device).unsqueeze(0)
-        key_padding_mask = frame_idx >= input_lengths.unsqueeze(1)   # (B, T) True = pad
-
-        for block in self.blocks:
-            feats = block(feats, key_padding_mask)
-        feats = self.layer_norm(feats)
-        logits = self.ctc_head(feats)                   # (B, T, C)
-
-        log_probs = logits.float().log_softmax(dim=-1)  # fp32 for CTC stability
-
-        loss = None
-        if labels is not None:
-            if label_lengths is None:
-                target_mask = labels != self.label_pad_id
-                label_lengths = target_mask.sum(dim=1)
-                targets = labels[target_mask]
-            else:
-                targets = labels
-            loss = self.ctc_loss(log_probs.permute(1, 0, 2), targets, input_lengths, label_lengths)
-
-        pred_ids = log_probs.argmax(dim=-1)
-        pred_ids = pred_ids.masked_fill(key_padding_mask, self.blank_id)
-        return {"loss": loss, "logits": pred_ids}
 
 
 # ============================================================================

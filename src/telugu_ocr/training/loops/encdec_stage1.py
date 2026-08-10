@@ -174,193 +174,23 @@ P_CLEAN = 0.50
 
 
 
-@dataclass
-class CTCEncoderConfig:
-    # ---- input ----
-    image_height: int = 64          # fixed by the positional design (§2)
-    max_image_width: int = 1024     # W ≤ max_image_width, multiple of 8
-    downsample: int = 8             # conv-stem width reduction: T = W // downsample
-    max_frames: int = 128           # = max_image_width // downsample (pos-emb length)
-
-    # ---- conv stem ----
-    stem_channels: tuple = (32, 64, 128, 256, 320, 384)
-    num_groups: int = 32            # GroupNorm groups (all stem widths divide 32)
-
-    # ---- transformer encoder ----
-    embed_dim: int = 384            # d_model (= last stem channel)
-    num_layers: int = 10
-    num_heads: int = 8
-    mlp_dim: int = 1536
-    dropout: float = 0.05           # CHANGED: match train_ctc_encoder.py (was 0.1)
-    drop_path_rate: float = 0.1     # stochastic depth (max rate, linearly scaled)
-
-    # ---- CTC head ----
-    vocab_size: int = 2048          # grapheme classes; blank appended at this index
+from src.telugu_ocr.models.encoder_decoder import (DecoderTransformerBlock, EncoderDecoder,
+                                                   TextDecoder)
+from src.telugu_ocr.models.image_encoder import (CTCEncoderConfig, ConvBlock, ConvStem, DropPath,
+                                                 ImageEncoderCTC, TransformerBlock)
+from src.telugu_ocr.models.text_decoder import (GPTConfig, GPTModel, GPTTransformerBlock,
+                                                MultiHeadAttention, SwiGLU,
+                                                calculate_positional_encodings)
 
 
-class ConvBlock(nn.Module):
-    """Conv → GroupNorm → GELU (one row of the §2.1 stem table)."""
-
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, num_groups):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
-        groups = num_groups if out_channels % num_groups == 0 else 1
-        self.norm = nn.GroupNorm(groups, out_channels)
-        self.act = nn.GELU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.act(self.norm(self.conv(x)))
 
 
-class ConvStem(nn.Module):
-    """Six-block convolutional tokenizer: (B,1,64,W) -> (B, T=W/8, 384)."""
-
-    def __init__(self, cfg: CTCEncoderConfig):
-        super().__init__()
-        c = cfg.stem_channels
-        assert len(c) == 6, "stem expects 6 conv blocks (§2.1)"
-        assert c[-1] == cfg.embed_dim, "last stem channel must equal embed_dim"
-
-        specs = [
-            ((3, 3), (2, 2), (1, 1)),  # Conv1: 32×32×W/2
-            ((3, 3), (2, 2), (1, 1)),  # Conv2: 64×16×W/4
-            ((3, 3), (2, 1), (1, 1)),  # Conv3: 128×8×W/4
-            ((3, 3), (2, 2), (1, 1)),  # Conv4: 256×4×W/8
-            ((3, 3), (2, 1), (1, 1)),  # Conv5: 320×2×W/8
-            ((2, 1), (2, 1), (0, 0)),  # Conv6: 384×1×W/8
-        ]
-
-        in_ch = 1
-        blocks = []
-        for out_ch, (k, s, p) in zip(c, specs):
-            blocks.append(ConvBlock(in_ch, out_ch, k, s, p, cfg.num_groups))
-            in_ch = out_ch
-        self.blocks = nn.ModuleList(blocks)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 1, H=64, W)
-        for block in self.blocks:
-            x = block(x)
-        B, D, H, T = x.shape
-        assert H == 1, f"conv stem did not collapse height to 1 (got {H})"
-        return x.squeeze(2).transpose(1, 2)  # (B, T, D)
 
 
-class DropPath(nn.Module):
-    """Stochastic depth: randomly drop the residual branch per-sample at train time."""
-
-    def __init__(self, drop_prob: float = 0.0):
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.drop_prob == 0.0 or not self.training:
-            return x
-        keep_prob = 1.0 - self.drop_prob
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        mask = x.new_empty(shape).bernoulli_(keep_prob)
-        return x / keep_prob * mask
 
 
-class TransformerBlock(nn.Module):
-    """Pre-LN transformer encoder block with stochastic depth (§2.1)."""
-
-    def __init__(self, cfg: CTCEncoderConfig, drop_path: float):
-        super().__init__()
-        self.layer_norm1 = nn.LayerNorm(cfg.embed_dim)
-        self.attention = nn.MultiheadAttention(
-            cfg.embed_dim, cfg.num_heads, dropout=cfg.dropout, batch_first=True
-        )
-        self.layer_norm2 = nn.LayerNorm(cfg.embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(cfg.embed_dim, cfg.mlp_dim),
-            nn.GELU(),
-            nn.Dropout(cfg.dropout),
-            nn.Linear(cfg.mlp_dim, cfg.embed_dim),
-            nn.Dropout(cfg.dropout),
-        )
-        self.drop_path = DropPath(drop_path)
-
-    def forward(self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None):
-        norm_x = self.layer_norm1(x)
-        attn_out, _ = self.attention(
-            norm_x, norm_x, norm_x,
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
-        )
-        x = x + self.drop_path(attn_out)
-        x = x + self.drop_path(self.mlp(self.layer_norm2(x)))
-        return x
 
 
-class ImageEncoderCTC(nn.Module):
-    """Conv stem → transformer encoder → CTC head (~20M params).
-
-    Only ``encode()`` is used by the encoder-decoder (frame features + a frame
-    padding mask); the CTC head / loss path is kept for standalone eval parity.
-    """
-
-    def __init__(self, cfg: CTCEncoderConfig, label_pad_id: int = -100):
-        super().__init__()
-        self.cfg = cfg
-        self.blank_id = cfg.vocab_size
-        self.num_classes = cfg.vocab_size + 1
-        self.label_pad_id = label_pad_id
-
-        self.stem = ConvStem(cfg)
-
-        self.pos_embed = nn.Parameter(torch.zeros(1, cfg.max_frames, cfg.embed_dim))
-        self.dropout = nn.Dropout(cfg.dropout)
-
-        dpr = torch.linspace(0.0, cfg.drop_path_rate, cfg.num_layers).tolist()
-        self.blocks = nn.ModuleList(
-            [TransformerBlock(cfg, drop_path=dpr[i]) for i in range(cfg.num_layers)]
-        )
-        self.layer_norm = nn.LayerNorm(cfg.embed_dim)
-
-        self.ctc_head = nn.Linear(cfg.embed_dim, self.num_classes)
-        self.ctc_loss = nn.CTCLoss(blank=self.blank_id, zero_infinity=True)
-
-        self._init_weights()
-
-    def _init_weights(self):
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-
-    def encode(self, images: torch.Tensor, input_lengths: torch.Tensor | None):
-        """Run the stem + transformer, returning frame features and the frame
-        padding mask (True = padded frame)."""
-        feats = self.stem(images)                       # (B, T, D)
-        B, T, D = feats.shape
-        assert T <= self.cfg.max_frames, (
-            f"T={T} exceeds max_frames={self.cfg.max_frames}; widen the pos-emb"
-        )
-        feats = feats + self.pos_embed[:, :T, :]
-        feats = self.dropout(feats)
-
-        if input_lengths is not None:
-            frame_idx = torch.arange(T, device=feats.device).unsqueeze(0)  # (1, T)
-            key_padding_mask = frame_idx >= input_lengths.unsqueeze(1)     # (B, T)
-        else:
-            key_padding_mask = None
-
-        for block in self.blocks:
-            feats = block(feats, key_padding_mask)
-        feats = self.layer_norm(feats)
-        return feats, key_padding_mask
-
-    @staticmethod
-    def frames_from_width(width: int, downsample: int = 8) -> int:
-        """Number of CTC frames a line of pixel ``width`` produces (= width/8)."""
-        assert width % downsample == 0, "width must be a multiple of the downsample factor"
-        return width // downsample
 
 
 # ============================================================================
@@ -369,329 +199,22 @@ class ImageEncoderCTC(nn.Module):
 from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 
 
-@dataclass
-class GPTConfig:
-    vocab_size: int = 2048
-    embed_dim: int = 512
-    hidden_dim: int = 2048
-    num_heads: int = 8
-    num_layers: int = 12
-    ctx_len: int = 1024
-    dropout: float = 0.1
 
 
-def calculate_positional_encodings(positions: torch.Tensor, embed_dim: int):
-    i = torch.arange(embed_dim // 2, dtype=torch.float32)
-    div_term = 10000 ** (2 * i / embed_dim)  # (D/2,)
-    pos = positions.float().unsqueeze(1)  # (T, 1)
-    args = pos / div_term  # (T, D/2)
-    enc = torch.zeros(len(positions), embed_dim)
-    enc[:, 0::2] = torch.sin(args)
-    enc[:, 1::2] = torch.cos(args)
-    return enc
 
 
-class SwiGLU(nn.Module):
-    """Implement the SwiGLU activation function"""
-
-    def __init__(self, embed_dim: int, hidden_dim: int):
-        super().__init__()
-        self.gate_proj = nn.Linear(embed_dim, hidden_dim, bias=False)
-        self.up_proj = nn.Linear(embed_dim, hidden_dim, bias=False)
-        self.down_proj = nn.Linear(hidden_dim, embed_dim, bias=False)
-
-    def forward(self, x):
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
-class MultiHeadAttention(nn.Module):
-    """Implement multi head attention"""
-
-    def __init__(self, embed_dim: int, num_heads: int, dropout: float):
-        super().__init__()
-        assert embed_dim % num_heads == 0, \
-            f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.dropout = dropout
-
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attn_mask=None):
-        # attn_mask: (B, 1, T, T) boolean — True means KEEP, False means MASK OUT
-        B, T, _ = query.shape
-        _, S, _ = key.shape
-
-        queries = self.q_proj(query).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        keys = self.k_proj(key).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-        values = self.v_proj(value).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-
-        dropout_p = self.dropout if self.training else 0.0
-        ctx_embeds = F.scaled_dot_product_attention(
-            queries, keys, values,
-            dropout_p=dropout_p,
-            attn_mask=attn_mask,
-            is_causal=False
-        )
-
-        ctx_embeds = ctx_embeds.transpose(1, 2).reshape(B, T, self.embed_dim)
-        return self.out_proj(ctx_embeds)
 
 
-class GPTTransformerBlock(nn.Module):
-    def __init__(self, config: GPTConfig):
-        super().__init__()
-        self.attention_layer = MultiHeadAttention(config.embed_dim, config.num_heads, config.dropout)
-        self.mlp = nn.Sequential(
-            SwiGLU(config.embed_dim, config.hidden_dim),
-            nn.Dropout(config.dropout)
-        )
-        self.layer_norm1 = nn.LayerNorm(config.embed_dim)
-        self.layer_norm2 = nn.LayerNorm(config.embed_dim)
-
-    def forward(self, x: torch.Tensor, attn_mask=None):
-        # x -> B, T, D
-        normed = self.layer_norm1(x)
-        x = x + self.attention_layer(normed, normed, normed, attn_mask=attn_mask)
-        x = x + self.mlp(self.layer_norm2(x))
-        return x
 
 
-class GPTModel(nn.Module):
-    _keys_to_ignore_on_save = None
-
-    def __init__(self, config: GPTConfig, pad_index: int):
-        super().__init__()
-        self.pad_index = pad_index
-        self.embedding_layer = nn.Embedding(config.vocab_size, config.embed_dim)
-        self.register_buffer("positional_encodings",
-                             calculate_positional_encodings(torch.arange(config.ctx_len), config.embed_dim))
-        self.transformer_blocks = nn.ModuleList([
-            GPTTransformerBlock(config) for _ in range(config.num_layers)
-        ])
-        self.layer_norm = nn.LayerNorm(config.embed_dim)
-        self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
-
-    def _build_attn_mask(self, input_ids, attention_mask):
-        """
-        Builds a combined boolean causal + padding mask.
-        SDPA expects: True = attend, False = ignore.
-        Shape: (B, 1, T, T)
-        """
-        B, T = input_ids.shape
-        device = input_ids.device
-        # Causal mask: upper triangle is False (masked), lower triangle True
-        causal = torch.ones(T, T, dtype=torch.bool, device=device).tril()  # (T, T)
-        if attention_mask is not None:
-            # attention_mask: (B, T), 1=real token, 0=pad
-            # Expand to (B, 1, 1, T) so it broadcasts over query positions
-            pad_mask = attention_mask.bool().unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
-            combined = causal.unsqueeze(0).unsqueeze(0) & pad_mask  # (B, 1, T, T)
-        else:
-            combined = causal.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
-        return combined
-
-    def forward(self, input_ids, attention_mask=None, labels=None):
-        # input_ids -> (B, T)
-        embeds = self.embedding_layer(input_ids)
-        T = input_ids.shape[1]
-        embeds = embeds + self.positional_encodings[:T].unsqueeze(0)
-        attn_mask = self._build_attn_mask(input_ids, attention_mask)
-        for block in self.transformer_blocks:
-            embeds = block(embeds, attn_mask=attn_mask)
-        embeds = self.layer_norm(embeds)
-        logits = self.lm_head(embeds)
-        loss = None
-
-        # Always calculate the loss
-        # shift for causal LM
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = input_ids[:, 1:].contiguous()
-        loss = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-            ignore_index=self.pad_index
-        )
-        return CausalLMOutput(
-            loss=loss,
-            logits=logits
-        )
 
 
-class DecoderTransformerBlock(nn.Module):
-    """Transformer block; cross-attention (with a zero-init tanh gate) is optional."""
-
-    def __init__(self, config: GPTConfig, use_cross_attention: bool = True):
-        super().__init__()
-        self.use_cross_attention = use_cross_attention
-        self.attention_layer = MultiHeadAttention(config.embed_dim, config.num_heads, dropout=config.dropout)
-
-        if self.use_cross_attention:
-            self.cross_attention_layer = MultiHeadAttention(config.embed_dim, config.num_heads, dropout=config.dropout)
-            self.layer_norm1_5 = nn.LayerNorm(config.embed_dim)
-            # Zero-init tanh gate (Flamingo-style): tanh(0) == 0, so the cross-attention
-            # branch contributes nothing at init and is phased in as the gate trains.
-            self.cross_attn_gate = nn.Parameter(torch.zeros(1))
-
-        self.mlp = nn.Sequential(
-            SwiGLU(config.embed_dim, config.hidden_dim),
-            nn.Dropout(config.dropout)
-        )
-
-        self.layer_norm1 = nn.LayerNorm(config.embed_dim)
-        self.layer_norm2 = nn.LayerNorm(config.embed_dim)
-
-    def forward(self, x: torch.Tensor, encoder_output: torch.Tensor, attn_mask=None, padding_mask=None):
-        normed = self.layer_norm1(x)
-        attn_out = self.attention_layer(normed, normed, normed, attn_mask)
-        x = x + attn_out
-
-        if self.use_cross_attention:
-            cross_in = self.layer_norm1_5(x)
-            cross_out = self.cross_attention_layer(cross_in, encoder_output, encoder_output, padding_mask)
-            x = x + torch.tanh(self.cross_attn_gate) * cross_out
-
-        mlp_in = self.layer_norm2(x)
-        mlp_out = self.mlp(mlp_in)
-        x = x + mlp_out
-
-        return x
 
 
-class TextDecoder(nn.Module):
-    """A text decoder model of the transformer model"""
-    _keys_to_ignore_on_save = None
-
-    def __init__(self, config: GPTConfig, pad_index: int):
-        super().__init__()
-        self.pad_index = pad_index
-        self.embedding_layer = nn.Embedding(config.vocab_size, config.embed_dim)
-        self.register_buffer("positional_encodings",
-                             calculate_positional_encodings(torch.arange(config.ctx_len), config.embed_dim))
-        # Cross-attention lives on even-indexed blocks only (every 2nd block).
-        self.transformer_blocks = nn.ModuleList([
-            DecoderTransformerBlock(config, use_cross_attention=(i % 2 == 0))
-            for i in range(config.num_layers)
-        ])
-        self.layer_norm = nn.LayerNorm(config.embed_dim)
-        self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
-
-    def _build_causal_attn_mask(self, input_ids, padding_mask):
-        """
-        Builds a combined boolean causal + padding mask.
-        SDPA expects: True = attend, False = ignore.
-        Shape: (B, 1, T, T)
-        """
-        B, T = input_ids.shape
-        device = input_ids.device
-        # Causal mask: upper triangle is False (masked), lower triangle True
-        causal = torch.ones(T, T, dtype=torch.bool, device=device).tril()  # (T, T)
-        if padding_mask is not None:
-            # padding_mask: (B, T), 1=real token, 0=pad
-            # Expand to (B, 1, 1, T) so it broadcasts over query positions
-            pad_mask = padding_mask.bool().unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
-            combined = causal.unsqueeze(0).unsqueeze(0) & pad_mask  # (B, 1, T, T)
-        else:
-            combined = causal.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
-        return combined
-
-    def forward(self, input_ids, encoder_output, text_padding_mask=None, img_text_padding_mask=None, labels=None):
-        # input_ids -> (B, T)
-        embeds = self.embedding_layer(input_ids)
-        T = input_ids.shape[1]
-        embeds = embeds + self.positional_encodings[:T].unsqueeze(0)
-        causal_attn_mask = self._build_causal_attn_mask(input_ids, text_padding_mask)
-        for block in self.transformer_blocks:
-            embeds = block(embeds, encoder_output, attn_mask=causal_attn_mask, padding_mask=img_text_padding_mask)
-        embeds = self.layer_norm(embeds)
-        logits = self.lm_head(embeds)
-        loss = None
-
-        # Always calculate the loss
-        # shift for causal LM
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = input_ids[:, 1:].contiguous()
-        loss = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-            ignore_index=self.pad_index
-        )
-        return CausalLMOutput(
-            loss=loss,
-            logits=logits
-        )
 
 
-class EncoderDecoder(nn.Module):
-    """An Image encoder and text decoder based transformer model"""
-
-    def __init__(self, encoder_config: CTCEncoderConfig, decoder_config: GPTConfig, pad_index: int):
-        super().__init__()
-        self.encoder_model = ImageEncoderCTC(encoder_config)
-        self.decoder_model = TextDecoder(decoder_config, pad_index)
-        # Bridge the encoder width (384) to the decoder width (512) so the frame
-        # features can feed the decoder's cross-attention keys/values. Trainable
-        # (the encoder is frozen); a no-op nn.Identity when the widths already match.
-        if encoder_config.embed_dim != decoder_config.embed_dim:
-            self.enc_to_dec = nn.Linear(encoder_config.embed_dim, decoder_config.embed_dim)
-        else:
-            self.enc_to_dec = nn.Identity()
-
-        # STAGE-1: the encoder is FROZEN and its features feed the trainable bridge
-        # (enc_to_dec) as a plain input, so NO gradient needs to flow back through it.
-        # Running encode() under torch.no_grad() makes that explicit. This is SAFE for
-        # the adapters — the bridge/cross-attention gradients are computed from the
-        # (constant) encoder features and are unchanged.
-        # ⚠️ SET TO False FOR FULL / STAGE-2 TRAINING: when the encoder is unfrozen it
-        #    must receive gradients, so the no_grad wrapper has to be turned off.
-        self.encoder_no_grad = True
-
-    @torch.no_grad()
-    def generate(self, pixel_values, bos_id, eos_id, max_new_tokens=256, no_repeat_cycle=True):
-        """ADDED (stage-1): single-sample (B=1) greedy decode for CER.
-        NOTE: in stage-1 the decoder lm_head / embeddings are FROZEN, so the model
-        cannot learn to emit EOS here; the repetition + length guards stop the
-        otherwise-runaway decode so CER reflects the characters it DOES produce."""
-        self.eval()
-        # All frames are valid for a single un-padded image, so input_lengths=None
-        # (encode() then treats every frame as real and skips the cross-attn mask).
-        enc_out, key_padding_mask = self.encoder_model.encode(pixel_values, None)
-        enc_out = self.enc_to_dec(enc_out)
-        cross_key_mask = None if key_padding_mask is None else (~key_padding_mask).unsqueeze(1).unsqueeze(2)
-        ids = torch.full((pixel_values.shape[0], 1), bos_id, dtype=torch.long, device=pixel_values.device)
-        ctx = self.decoder_model.positional_encodings.shape[0]
-        for _ in range(min(max_new_tokens, ctx - 1)):
-            out = self.decoder_model(ids, enc_out, text_padding_mask=None,
-                                     img_text_padding_mask=cross_key_mask, labels=None)
-            nxt = out.logits[:, -1, :].argmax(-1, keepdim=True)
-            ids = torch.cat([ids, nxt], dim=1)
-            if nxt.item() == eos_id:
-                break
-            if no_repeat_cycle and ids.shape[1] > 24:  # stop short repeating loops
-                tail = ids[0, -12:].tolist()
-                if any(tail == tail[-k:] * (12 // k) for k in (1, 2, 3, 4)):
-                    break
-        return ids[0].tolist()
-
-    def forward(self, pixel_values, input_ids, input_lengths=None, text_padding_mask=None, return_loss=True):
-        # pixel_values -> (B, 1, H, W); input_lengths -> (B,) valid frames = W_real // downsample
-        # Frozen encoder -> run under no_grad (see self.encoder_no_grad in __init__).
-        enc_ctx = torch.no_grad() if self.encoder_no_grad else contextlib.nullcontext()
-        with enc_ctx:
-            encoder_output, key_padding_mask = self.encoder_model.encode(pixel_values, input_lengths)
-        encoder_output = self.enc_to_dec(encoder_output)         # (B, T, dec_embed_dim); bridge is trainable
-
-        if key_padding_mask is not None:
-            # Custom cross-attention expects an SDPA-style mask (True = KEEP), shape (B, 1, 1, T).
-            cross_key_mask = (~key_padding_mask).unsqueeze(1).unsqueeze(2)
-        else:
-            cross_key_mask = None
-        decoder_output = self.decoder_model(input_ids, encoder_output, text_padding_mask, cross_key_mask, None)
-        return decoder_output
 
 
 # ============================================================================
@@ -1095,7 +618,13 @@ if __name__ == '__main__':
     model = EncoderDecoder(
         encoder_config=img_encoder_cfg,
         decoder_config=pretrained_config,
-        pad_index=tokenizer.pad_token_id
+        pad_index=tokenizer.pad_token_id,
+        # STAGE-1: the encoder is frozen, so keep it out of the autograd graph entirely
+        # rather than relying on requires_grad -- that saves the encoder activations.
+        # This was hardcoded inside stage-1's own copy of EncoderDecoder before phase 3.
+        encoder_no_grad=True,
+        # No CTC auxiliary term in stage 1; only the cross-attention is training.
+        ctc_loss_weight=0.0,
     )
 
     # -------------- Step-3: Replace the random weights with pretrained weights --------------
