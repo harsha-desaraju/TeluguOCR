@@ -87,7 +87,8 @@ def run_stage(loop_module: str, stage: int) -> list:
     if stage == 1:
         coll = mod.OCRCollator(pad_token_id=tok.pad_token_id, downsample=8)
     else:
-        coll = mod.OCRCollator(pad_token_id=tok.pad_token_id, downsample=8,
+        # mirror the stage-2 call site exactly: emit_ctc on, BOS/EOS stripped
+        coll = mod.OCRCollator(emit_ctc=True, pad_token_id=tok.pad_token_id, downsample=8,
                                ctc_strip_ids=(tok.bos_token_id, tok.eos_token_id))
 
     from src.telugu_ocr.data.collators import LineTensorizer
@@ -122,6 +123,37 @@ def run_stage(loop_module: str, stage: int) -> list:
     return losses
 
 
+def run_callback(loop_module: str, stage: int) -> dict:
+    """CEREvalCallback's per-slice CER, on a tiny model. Covers the eval metrics the
+    loss curve does not: generation CER, and (stage 2) teacher-forced and CTC CER."""
+    mod = importlib.import_module(loop_module)
+    from tests.model_registry import build_tokenizer
+    from src.telugu_ocr.data.collators import LineTensorizer
+    tok = build_tokenizer()
+    seed_all(0)
+    enc, dec = small_cfgs(mod, len(tok))
+    kw = dict(encoder_config=enc, decoder_config=dec, pad_index=tok.pad_token_id)
+    kw.update(encoder_no_grad=(stage == 1),
+              ctc_loss_weight=0.0 if stage == 1 else getattr(mod, "CTC_LOSS_WEIGHT", 0.3))
+    model = mod.EncoderDecoder(**kw).eval()
+
+    rows = [{"image": r["image"], "text": r["text"]} for r in synth_batch(tok)]
+    # mirror each stage's call site: stage 2 also reports teacher-forced and CTC CER
+    extra = {"report_tf": True, "report_ctc": True} if stage == 2 else {}
+    cbk = mod.CEREvalCallback(model, {"all": rows}, LineTensorizer(), tok,
+                              image_col="image", text_col="text", **extra)
+    import contextlib
+    out = cbk._slice_cer(rows, "cpu", dec.ctx_len, "image", "text")
+    # stage 1 returns (cer, preds, refs); stage 2 a dict of three CERs plus the
+    # hypotheses. Keep both the numbers AND the decoded strings -- a CER can stay put
+    # while the text behind it changes.
+    if isinstance(out, tuple):
+        cer, preds, refs = out
+        return {"gen_cer": round(float(cer), 6), "gen": list(preds), "refs": list(refs)}
+    return {k: (round(float(v), 6) if isinstance(v, (int, float)) else list(v))
+            for k, v in sorted(out.items())}
+
+
 TARGETS = {
     "stage1": ("src.telugu_ocr.training.loops.encdec_stage1", 1),
     "stage2": ("src.telugu_ocr.training.loops.encdec_stage2", 2),
@@ -138,6 +170,12 @@ for name, (mod, stage) in TARGETS.items():
     try:
         curves[name] = run_stage(mod, stage)
         print(f"{name}: {curves[name][:4]} ... {curves[name][-2:]}")
+        try:
+            curves[name + "_cer"] = run_callback(mod, stage)
+            print(f"{name}_cer: {curves[name + '_cer']}")
+        except Exception as e:
+            print(f"{name}_cer: FAILED {type(e).__name__}: {str(e)[:70]}")
+            curves[name + "_cer"] = None
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -151,8 +189,14 @@ else:
     prev = json.load(open(SNAP))
     bad = 0
     print()
-    for name in TARGETS:
+    for name in list(TARGETS) + [n + "_cer" for n in TARGETS]:
         a, b = prev.get(name), curves.get(name)
+        if isinstance(a, dict) or isinstance(b, dict):
+            if a != b:
+                print(f"  {name}: MOVED\n      before {a}\n      after  {b}"); bad += 1
+            else:
+                print(f"  {name}: identical {a}")
+            continue
         if a is None or b is None:
             print(f"  {name}: MISSING (before={a is not None}, after={b is not None})"); bad += 1
         elif len(a) != len(b) or any(abs(x - y) > TOL for x, y in zip(a, b)):

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 
@@ -89,3 +90,95 @@ class CTCBatchMapper:
             "target_ids": [self.tokenizer(t, add_special_tokens=False)["input_ids"]
                            for t in batch[self.text_col]],
         }
+
+
+class OCRCollator:
+    """
+    Each dataset example is expected to be a dict with:
+      - 'pixel_values': float tensor (1, H, W_i)   # H fixed (image_height=64), W_i variable
+      - 'input_ids'   : 1D long tensor / list      # variable length, NO padding yet
+
+    Produces a batch dict whose keys match EncoderDecoder.forward exactly:
+      pixel_values      (B, 1, H, W_max)   float, right-padded on width with zeros
+      input_ids         (B, T_max)         long, right-padded with pad_token_id
+      input_lengths     (B,)               long, valid CTC frames = W_i // downsample
+      text_padding_mask (B, T_max)         float, 1 = REAL token  (decoder convention)
+
+    The CTC encoder collapses image height to 1, so each image contributes
+    W_i // downsample frame tokens. ``input_lengths`` tells encode() how many of
+    the padded-batch frames are real; it builds the cross-attention key mask from it.
+
+    Assumes every image width W_i is already a multiple of ``downsample`` (your
+    ImagePreprocessor pads to that). If not, the batch is padded up to a multiple.
+    """
+
+    def __init__(self, pad_token_id: int, downsample: int = 8, ctc_strip_ids=(),
+                 emit_ctc: bool = False):
+        # emit_ctc defaults OFF = stage 1: no CTC target tensors in the batch at all.
+        # Stage 2 turns it on and passes the BOS/EOS ids to strip.
+        self.emit_ctc = emit_ctc
+        self.pad_token_id = pad_token_id
+        self.downsample = downsample
+        # Token ids removed from input_ids to form the CTC grapheme targets. Pass the
+        # BOS / EOS ids: input_ids are [BOS, graphemes..., EOS], and the CTC head is
+        # trained on the bare grapheme sequence (same convention as the CTC encoder).
+        self.ctc_strip_ids = set(ctc_strip_ids)
+
+    def __call__(self, batch):
+        images = [ex["pixel_values"] for ex in batch]
+        token_seqs = [torch.as_tensor(ex["input_ids"], dtype=torch.long) for ex in batch]
+        B = len(batch)
+
+        # ---- Images ----
+        widths = [img.shape[-1] for img in images]
+        max_w = max(widths)
+        if max_w % self.downsample != 0:  # safety; should already be a multiple
+            max_w += self.downsample - (max_w % self.downsample)
+
+        padded_imgs = [F.pad(img, (0, max_w - w)) for img, w in zip(images, widths)]
+        pixel_values = torch.stack(padded_imgs, dim=0)  # (B, 1, H, max_w)
+
+        # Valid frame count per sample = real_width // downsample (ceil so a partial
+        # edge frame is counted as real, not padded).
+        input_lengths = torch.tensor(
+            [min((w + self.downsample - 1) // self.downsample, max_w // self.downsample) for w in widths],
+            dtype=torch.long,
+        )
+
+        # ---- Text (right-pad) ----
+        max_t = max(seq.shape[0] for seq in token_seqs)
+        input_ids = torch.full((B, max_t), self.pad_token_id, dtype=torch.long)
+        text_padding_mask = torch.zeros((B, max_t), dtype=torch.float)  # 1 = real
+        for i, seq in enumerate(token_seqs):
+            n = seq.shape[0]
+            input_ids[i, :n] = seq
+            text_padding_mask[i, :n] = 1.0
+
+        # ---- CTC targets: bare grapheme ids (BOS/EOS stripped), right-padded ----
+        # Only built when emit_ctc is on (stage 2). Stage 1 gets a batch with exactly the
+        # keys it had before this collator was shared.
+        out = {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids,
+            "input_lengths": input_lengths,
+            "text_padding_mask": text_padding_mask,
+        }
+        if not self.emit_ctc:
+            return out
+
+        # Padded with 0; only the first ctc_label_lengths[i] entries per row are read by
+        # nn.CTCLoss, so the pad value is irrelevant.
+        ctc_seqs = [
+            torch.as_tensor([t for t in seq.tolist() if t not in self.ctc_strip_ids],
+                            dtype=torch.long)
+            for seq in token_seqs
+        ]
+        ctc_label_lengths = torch.tensor([s.shape[0] for s in ctc_seqs], dtype=torch.long)
+        max_s = max(int(ctc_label_lengths.max().item()), 1)
+        ctc_labels = torch.zeros((B, max_s), dtype=torch.long)
+        for i, s in enumerate(ctc_seqs):
+            ctc_labels[i, :s.shape[0]] = s
+        out["ctc_labels"] = ctc_labels
+        out["ctc_label_lengths"] = ctc_label_lengths
+        return out
+

@@ -91,3 +91,25 @@ def build_scheduler(optimizer, warmup_steps, total_steps, min_lr=None):
                              "optimizer with min_lrs so each group carries its own")
         lambdas.append(make(g["lr"], floor))
     return LambdaLR(optimizer, lambdas)
+
+
+# ----------------------------------------------------------------------------------
+# Stage-2 LR tiers
+# ----------------------------------------------------------------------------------
+# Three groups that want different learning rates once the whole network trains: the
+# pretrained encoder (lowest -- it is already good and easily damaged), the newly-added
+# cross-attention (highest -- still the least trained part), and the LM in between.
+LR_TIERS = ("encoder", "cross", "lm")
+_CROSS_KEYS = ("cross_attention_layer", "layer_norm1_5", "cross_attn_gate", "enc_to_dec")
+
+
+def _param_tier(name: str) -> str:
+    if name.startswith("encoder_model."):
+        return "encoder"                                  # backbone + ctc_head
+    if name.startswith("enc_to_dec."):
+        return "cross"                                    # bridge feeds cross-attn K/V
+    if any(k in name for k in _CROSS_KEYS):
+        return "cross"                                    # cross-attention adapters
+    return "lm"
+
+param_tier = _param_tier

@@ -234,150 +234,13 @@ from src.telugu_ocr.training.optim import build_optimizer, build_scheduler
 # at 48/slice x 2 slices (natural / random) that is ~96 sequences, a few minutes —
 # comfortably inside the raised ddp_timeout. Raise for a sharper CER estimate only if
 # you also raise ddp_timeout.
-CER_EVAL_SAMPLES = 48   # eval images decoded per slice per CER eval (B=1 greedy)
-CER_PRINT_K = 5  # print this many ref/hyp pairs each eval
+from src.telugu_ocr.data.collators import OCRCollator
+from src.telugu_ocr.training.callbacks import CEREvalCallback
+from src.telugu_ocr.training.trainer import EncoderDecoderTrainer
 
 
-class CEREvalCallback(TrainerCallback):
-    """Generate-based CER during evaluate(), reported PER WIDTH SLICE.
-
-    ``eval_slices`` is a dict ``{slice_name: [raw_row, ...]}`` where each raw row
-    has the image / text columns. For each slice we B=1 greedy-decode up to
-    CER_EVAL_SAMPLES images and inject ``eval_<slice>_cer`` into the metrics dict
-    (also logged to wandb). A macro-average ``eval_cer`` over slices is added too.
-
-    Early stopping was removed, so this metric is purely for monitoring; CER is
-    still computed on every rank (identical subset -> identical value) while
-    printing / wandb logging happen on rank 0 only.
-    """
-
-    def __init__(self, model, eval_slices, preprocessor, tokenizer,
-                 image_col="image", text_col="text"):
-        self.model = model
-        self.slices = eval_slices  # {name: list of raw rows with image/text cols}
-        self.prep = preprocessor   # clean preprocessor (no augmentation)
-        self.tok = tokenizer
-        self.image_col = image_col
-        self.text_col = text_col
-
-    def _slice_cer(self, rows, device, ctx, image_col, text_col):
-        n = min(CER_EVAL_SAMPLES, len(rows))
-        preds, refs = [], []
-        for i in range(n):
-            ex = rows[i]
-            pix = self.prep(ex[image_col]).unsqueeze(0).to(device)  # (1, 1, H, W)
-            ref_ids = self.tok.encode(ex[text_col])
-            cap = min(ctx - 1, int(1.5 * len(ref_ids)) + 10)        # length-aware cap
-            ids = self.model.generate(pix, self.tok.bos_token_id, self.tok.eos_token_id,
-                                      max_new_tokens=cap)
-            preds.append(self.tok.decode(ids, skip_special_tokens=True))
-            refs.append(ex[text_col])
-        return compute_cer(preds, refs), preds, refs
-
-    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        # RANK-0 ONLY. This CER is monitoring-only (no early stopping / best-model
-        # selection reads it), and the generation is a long, collective-free stretch of
-        # work. Running it independently on every rank lets the ranks desync — one
-        # finishes and hits the next NCCL barrier while the other is still decoding — and
-        # blows past ddp_timeout (the 30-min ALLGATHER watchdog that killed the run).
-        # Doing it on rank 0 alone keeps control flow deterministic; the other ranks skip
-        # to the following save/step barrier and wait (ddp_timeout is raised to cover it).
-        if not state.is_world_process_zero:
-            return
-        try:
-            self.model.eval()
-            device = next(self.model.parameters()).device
-            ctx = self.model.decoder_model.positional_encodings.shape[0]
-            image_col, text_col = self.image_col, self.text_col
-            per_slice = {}
-            for name, rows in self.slices.items():
-                if not rows:
-                    continue
-                cer, preds, refs = self._slice_cer(rows, device, ctx, image_col, text_col)
-                per_slice[name] = cer
-                if metrics is not None:
-                    metrics[f"eval_{name}_cer"] = cer
-                print(f"[eval] step {state.global_step}  {name} CER={cer:.4f} (n={min(CER_EVAL_SAMPLES, len(rows))})", flush=True)
-                for p, r in list(zip(preds, refs))[:CER_PRINT_K]:
-                    print(f"    [{name}] ref: {r!r}")
-                    print(f"    [{name}] hyp: {p!r}")
-            if per_slice:
-                macro = sum(per_slice.values()) / len(per_slice)  # macro-average across slices
-                if metrics is not None:
-                    metrics["eval_cer"] = macro
-                print(f"[eval] step {state.global_step}  macro CER={macro:.4f}", flush=True)
-                try:
-                    import wandb
-                    wandb.log({**{f"eval_{k}_cer": v for k, v in per_slice.items()},
-                               "eval_cer": macro}, step=state.global_step)
-                except Exception:
-                    pass
-        except Exception as exc:
-            print(f"[CER] failed at step {state.global_step}: {exc}", flush=True)
-        finally:
-            self.model.train()  # restore train mode for the rest of training
 
 
-class OCRCollator:
-    """
-    Each dataset example is expected to be a dict with:
-      - 'pixel_values': float tensor (1, H, W_i)   # H fixed (image_height=64), W_i variable
-      - 'input_ids'   : 1D long tensor / list      # variable length, NO padding yet
-
-    Produces a batch dict whose keys match EncoderDecoder.forward exactly:
-      pixel_values      (B, 1, H, W_max)   float, right-padded on width with zeros
-      input_ids         (B, T_max)         long, right-padded with pad_token_id
-      input_lengths     (B,)               long, valid CTC frames = W_i // downsample
-      text_padding_mask (B, T_max)         float, 1 = REAL token  (decoder convention)
-
-    The CTC encoder collapses image height to 1, so each image contributes
-    W_i // downsample frame tokens. ``input_lengths`` tells encode() how many of
-    the padded-batch frames are real; it builds the cross-attention key mask from it.
-
-    Assumes every image width W_i is already a multiple of ``downsample`` (your
-    ImagePreprocessor pads to that). If not, the batch is padded up to a multiple.
-    """
-
-    def __init__(self, pad_token_id: int, downsample: int = 8):
-        self.pad_token_id = pad_token_id
-        self.downsample = downsample
-
-    def __call__(self, batch):
-        images = [ex["pixel_values"] for ex in batch]
-        token_seqs = [torch.as_tensor(ex["input_ids"], dtype=torch.long) for ex in batch]
-        B = len(batch)
-
-        # ---- Images ----
-        widths = [img.shape[-1] for img in images]
-        max_w = max(widths)
-        if max_w % self.downsample != 0:  # safety; should already be a multiple
-            max_w += self.downsample - (max_w % self.downsample)
-
-        padded_imgs = [F.pad(img, (0, max_w - w)) for img, w in zip(images, widths)]
-        pixel_values = torch.stack(padded_imgs, dim=0)  # (B, 1, H, max_w)
-
-        # Valid frame count per sample = real_width // downsample (ceil so a partial
-        # edge frame is counted as real, not padded).
-        input_lengths = torch.tensor(
-            [min((w + self.downsample - 1) // self.downsample, max_w // self.downsample) for w in widths],
-            dtype=torch.long,
-        )
-
-        # ---- Text (right-pad) ----
-        max_t = max(seq.shape[0] for seq in token_seqs)
-        input_ids = torch.full((B, max_t), self.pad_token_id, dtype=torch.long)
-        text_padding_mask = torch.zeros((B, max_t), dtype=torch.float)  # 1 = real
-        for i, seq in enumerate(token_seqs):
-            n = seq.shape[0]
-            input_ids[i, :n] = seq
-            text_padding_mask[i, :n] = 1.0
-
-        return {
-            "pixel_values": pixel_values,
-            "input_ids": input_ids,
-            "input_lengths": input_lengths,
-            "text_padding_mask": text_padding_mask
-        }
 
 
 # ============================================================================
@@ -388,56 +251,6 @@ class OCRCollator:
 # Scheduler: warmup -> cosine decay to an ABSOLUTE floor `min_lr`. Single LR tier.
 
 
-class EncoderDecoderTrainer(Trainer):
-    """Trainer that builds the warmup->cosine-to-min_lr scheduler with the step
-    count Trainer computes (so we don't reason about DDP/epochs ourselves).
-
-    STAGE-1 ONLY — trains with the model held in ``.eval()`` mode
-    =========================================================================
-    In stage-1 the image encoder and the pretrained decoder layers are FROZEN and
-    only the newly-added adapters (cross-attention + zero-init gates + the 384->512
-    bridge) train. We do NOT want the frozen backbone's dropout / stochastic-depth
-    (DropPath) injecting noise into the features the adapters learn from, so every
-    TRAINING forward is run in eval mode (see ``compute_loss``).
-
-    HF ``Trainer.training_step`` calls ``model.train()` at the start of every step,
-    so a one-off ``model.eval()`` before ``trainer.train()`` would not stick; forcing
-    it inside ``compute_loss`` (right before the forward) is what makes it hold. Note
-    ``eval()`` only flips the dropout/DropPath flags — it does NOT stop gradients, so
-    the adapters still train normally.
-
-    This ALSO disables dropout inside the trainable cross-attention adapters, which is
-    acceptable for stage-1 adapter warm-up.
-
-    ⚠️  CHANGE FOR FULL / STAGE-2 TRAINING: once the backbone is unfrozen and trained
-    end-to-end, set ``FORCE_EVAL_DURING_TRAIN = False`` (or drop the ``compute_loss``
-    override) so dropout / stochastic depth are active again for regularization.
-    """
-
-    # Stage-1 default: run the training forward in eval mode. Flip to False for
-    # full / end-to-end (stage-2) training where dropout should be ON.
-    FORCE_EVAL_DURING_TRAIN = True
-
-    def __init__(self, *args, warmup_steps=1500, min_lr=1e-5, **kwargs):
-        self._warmup_steps = warmup_steps
-        self._min_lr = min_lr
-        super().__init__(*args, **kwargs)
-
-    def create_scheduler(self, num_training_steps, optimizer=None):
-        if self.lr_scheduler is None:
-            self.lr_scheduler = build_scheduler(
-                optimizer or self.optimizer, self._warmup_steps, num_training_steps, self._min_lr)
-        return self.lr_scheduler
-
-    def compute_loss(self, model, inputs, *args, **kwargs):
-        # STAGE-1: keep the frozen backbone (and, acceptably, the adapters) deterministic
-        # for the training forward — dropout / DropPath off. Trainer.training_step has
-        # already called model.train(); we override it here, per step, right before the
-        # forward. Gradients still flow, so the adapter layers train.
-        # ⚠️ Remove / gate off (FORCE_EVAL_DURING_TRAIN=False) for full/stage-2 training.
-        if self.FORCE_EVAL_DURING_TRAIN:
-            model.eval()
-        return super().compute_loss(model, inputs, *args, **kwargs)
 
 
 
@@ -750,6 +563,9 @@ if __name__ == '__main__':
     )
 
     trainer = EncoderDecoderTrainer(
+        # STAGE-1: frozen backbone -> run the training forward in eval() so its dropout
+        # and DropPath do not inject noise into the features the adapters learn from.
+        force_eval_during_train=True,
         model=model,
         args=training_args,
         train_dataset=train_dataset,

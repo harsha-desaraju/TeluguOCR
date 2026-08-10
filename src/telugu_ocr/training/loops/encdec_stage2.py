@@ -250,239 +250,15 @@ from src.telugu_ocr.training.optim import build_optimizer, build_scheduler
 # at 48/slice x 2 slices (natural / random) that is ~96 sequences, a few minutes —
 # comfortably inside the raised ddp_timeout. Raise for a sharper CER estimate only if
 # you also raise ddp_timeout.
-CER_EVAL_SAMPLES = 48   # eval images decoded per slice per CER eval (B=1 greedy)
-CER_PRINT_K = 2  # print this many ref/hyp pairs each eval (kept small: stdout volume
+from src.telugu_ocr.data.collators import OCRCollator
+from src.telugu_ocr.training.callbacks import CEREvalCallback
+from src.telugu_ocr.training.optim import LR_TIERS, _param_tier
+from src.telugu_ocr.training.trainer import EncoderDecoderTrainer
                  # is what backed up the notebook pipe / wandb console and hung rank 0)
 
 
-class CEREvalCallback(TrainerCallback):
-    """CER during evaluate(), reported PER SLICE, for the model's TWO decoders:
-
-      TEXT decoder (autoregressive LM), in two flavours:
-        * generation CER     (``eval_<slice>_cer``)     — free-running B=1 greedy decode
-        * teacher-forced CER (``eval_<slice>_tf_cer``)  — one forward with the ground-truth
-                                                          tokens fed in, argmax next-token
-      CTC decoder (the encoder's CTC head):
-        * CTC CER            (``eval_<slice>_ctc_cer``) — per-frame argmax -> collapse
-                                                          repeats -> drop blanks (no ref)
-
-    All three are computed on the SAME up-to-CER_EVAL_SAMPLES images per slice, so they are
-    directly comparable. Macro-averages ``eval_cer`` / ``eval_tf_cer`` / ``eval_ctc_cer``
-    over slices are added too. All metrics go into the metrics dict and to wandb.
-
-    Early stopping was removed, so these are purely for monitoring; everything runs on
-    rank 0 only (see on_evaluate).
-    """
-
-    def __init__(self, model, eval_slices, preprocessor, tokenizer,
-                 image_col="image", text_col="text"):
-        self.model = model
-        self.slices = eval_slices  # {name: list of raw rows with image/text cols}
-        self.prep = preprocessor   # clean preprocessor (no augmentation)
-        self.tok = tokenizer
-        self.image_col = image_col
-        self.text_col = text_col
-
-    @torch.no_grad()
-    def _teacher_forced_pred(self, bridged, cross_key_mask, ref_ids, device):
-        """Teacher-forced through the TEXT decoder, REUSING a precomputed (bridged) encoder
-        output — no re-encode. logits[t] predicts token t+1, so argmax(logits[:-1]) are the
-        predictions for ref positions 1..T-1. Returns the decoded hypothesis string."""
-        ids = torch.as_tensor([ref_ids], dtype=torch.long, device=device)  # (1, T)
-        out = self.model.decoder_model(ids, bridged, text_padding_mask=None,
-                                       img_text_padding_mask=cross_key_mask, labels=None)
-        pred = out.logits[0, :-1].argmax(dim=-1)         # (T-1,)
-        return self.tok.decode(pred.tolist(), skip_special_tokens=True)
-
-    @torch.no_grad()
-    def _ctc_pred(self, enc_raw):
-        """CTC greedy decode from the encoder's CTC head (the second decoder), REUSING the
-        precomputed RAW (pre-bridge) encoder output: per-frame argmax -> collapse consecutive
-        repeats -> drop blanks -> decode. Collapse matches the standalone CTC encoder's eval."""
-        logits = self.model.encoder_model.ctc_head(enc_raw)       # (1, T, C=vocab+1)
-        frame_ids = logits[0].argmax(dim=-1).tolist()
-        blank = self.model.encoder_model.blank_id
-        collapsed, prev = [], None
-        for t in frame_ids:
-            if t != prev and t != blank:
-                collapsed.append(t)
-            prev = t
-        return self.tok.decode(collapsed, skip_special_tokens=True)
-
-    def _slice_cer(self, rows, device, ctx, image_col, text_col):
-        n = min(CER_EVAL_SAMPLES, len(rows))
-        gen_preds, tf_preds, ctc_preds, refs = [], [], [], []
-        for i in range(n):
-            ex = rows[i]
-            pix = self.prep(ex[image_col]).unsqueeze(0).to(device)  # (1, 1, H, W)
-            ref_ids = self.tok.encode(ex[text_col])
-            cap = min(ctx - 1, int(1.5 * len(ref_ids)) + 10)        # length-aware cap
-
-            # ---- ONE encoder forward per image, shared by all three decoders ----
-            # B=1 un-padded -> input_lengths=None, so key_padding_mask (and cross_key_mask)
-            # is None. enc_raw feeds the CTC head; bridged (enc_raw -> enc_to_dec) feeds the
-            # text decoder's cross-attention. Mirrors EncoderDecoder.forward exactly.
-            with torch.no_grad():
-                enc_raw, key_padding_mask = self.model.encoder_model.encode(pix, None)  # (1, T, D)
-                bridged = self.model.enc_to_dec(enc_raw)                                # (1, T, dec_dim)
-            cross_key_mask = (None if key_padding_mask is None
-                              else (~key_padding_mask).unsqueeze(1).unsqueeze(2))
-
-            gen_ids = self.model.generate(                                    # text decoder (generation)
-                pix, self.tok.bos_token_id, self.tok.eos_token_id,
-                max_new_tokens=cap, enc_out=bridged, cross_key_mask=cross_key_mask)
-            gen_preds.append(self.tok.decode(gen_ids, skip_special_tokens=True))
-            tf_preds.append(                                                  # text decoder (teacher-forced)
-                self._teacher_forced_pred(bridged, cross_key_mask, ref_ids, device))
-            ctc_preds.append(self._ctc_pred(enc_raw))                         # CTC decoder
-            refs.append(ex[text_col])
-        return {
-            "gen_cer": compute_cer(gen_preds, refs),
-            "tf_cer": compute_cer(tf_preds, refs),
-            "ctc_cer": compute_cer(ctc_preds, refs),
-            "gen": gen_preds, "tf": tf_preds, "ctc": ctc_preds, "refs": refs,
-        }
-
-    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        # RANK-0 ONLY. This CER is monitoring-only (no early stopping / best-model
-        # selection reads it), and the generation is a long, collective-free stretch of
-        # work. Running it independently on every rank lets the ranks desync — one
-        # finishes and hits the next NCCL barrier while the other is still decoding — and
-        # blows past ddp_timeout (the 30-min ALLGATHER watchdog that killed the run).
-        # Doing it on rank 0 alone keeps control flow deterministic; the other ranks skip
-        # to the following save/step barrier and wait (ddp_timeout is raised to cover it).
-        if not state.is_world_process_zero:
-            return
-        try:
-            self.model.eval()
-            device = next(self.model.parameters()).device
-            ctx = self.model.decoder_model.positional_encodings.shape[0]
-            image_col, text_col = self.image_col, self.text_col
-            per_gen, per_tf, per_ctc = {}, {}, {}
-            for name, rows in self.slices.items():
-                if not rows:
-                    continue
-                r = self._slice_cer(rows, device, ctx, image_col, text_col)
-                per_gen[name] = r["gen_cer"]
-                per_tf[name] = r["tf_cer"]
-                per_ctc[name] = r["ctc_cer"]
-                if metrics is not None:
-                    metrics[f"eval_{name}_cer"] = r["gen_cer"]          # text decoder (generation)
-                    metrics[f"eval_{name}_tf_cer"] = r["tf_cer"]        # text decoder (teacher-forced)
-                    metrics[f"eval_{name}_ctc_cer"] = r["ctc_cer"]      # CTC decoder
-                print(f"[eval] step {state.global_step}  {name} genCER={r['gen_cer']:.4f} "
-                      f"tfCER={r['tf_cer']:.4f} ctcCER={r['ctc_cer']:.4f} "
-                      f"(n={min(CER_EVAL_SAMPLES, len(rows))})", flush=True)
-                for gp, tp, cp, rf in list(zip(r["gen"], r["tf"], r["ctc"], r["refs"]))[:CER_PRINT_K]:
-                    print(f"    [{name}] ref: {rf!r}")
-                    print(f"    [{name}] gen: {gp!r}")
-                    print(f"    [{name}] tf : {tp!r}")
-                    print(f"    [{name}] ctc: {cp!r}")
-            if per_gen:
-                macro = sum(per_gen.values()) / len(per_gen)          # macro-avg text-decoder generation CER
-                macro_tf = sum(per_tf.values()) / len(per_tf)         # macro-avg text-decoder teacher-forced CER
-                macro_ctc = sum(per_ctc.values()) / len(per_ctc)      # macro-avg CTC-decoder CER
-                if metrics is not None:
-                    metrics["eval_cer"] = macro
-                    metrics["eval_tf_cer"] = macro_tf
-                    metrics["eval_ctc_cer"] = macro_ctc
-                print(f"[eval] step {state.global_step}  macro genCER={macro:.4f} "
-                      f"tfCER={macro_tf:.4f} ctcCER={macro_ctc:.4f}", flush=True)
-                try:
-                    import wandb
-                    wandb.log({**{f"eval_{k}_cer": v for k, v in per_gen.items()},
-                               **{f"eval_{k}_tf_cer": v for k, v in per_tf.items()},
-                               **{f"eval_{k}_ctc_cer": v for k, v in per_ctc.items()},
-                               "eval_cer": macro, "eval_tf_cer": macro_tf,
-                               "eval_ctc_cer": macro_ctc}, step=state.global_step)
-                except Exception:
-                    pass
-        except Exception as exc:
-            print(f"[CER] failed at step {state.global_step}: {exc}", flush=True)
-        finally:
-            self.model.train()  # restore train mode for the rest of training
 
 
-class OCRCollator:
-    """
-    Each dataset example is expected to be a dict with:
-      - 'pixel_values': float tensor (1, H, W_i)   # H fixed (image_height=64), W_i variable
-      - 'input_ids'   : 1D long tensor / list      # variable length, NO padding yet
-
-    Produces a batch dict whose keys match EncoderDecoder.forward exactly:
-      pixel_values      (B, 1, H, W_max)   float, right-padded on width with zeros
-      input_ids         (B, T_max)         long, right-padded with pad_token_id
-      input_lengths     (B,)               long, valid CTC frames = W_i // downsample
-      text_padding_mask (B, T_max)         float, 1 = REAL token  (decoder convention)
-
-    The CTC encoder collapses image height to 1, so each image contributes
-    W_i // downsample frame tokens. ``input_lengths`` tells encode() how many of
-    the padded-batch frames are real; it builds the cross-attention key mask from it.
-
-    Assumes every image width W_i is already a multiple of ``downsample`` (your
-    ImagePreprocessor pads to that). If not, the batch is padded up to a multiple.
-    """
-
-    def __init__(self, pad_token_id: int, downsample: int = 8, ctc_strip_ids=()):
-        self.pad_token_id = pad_token_id
-        self.downsample = downsample
-        # Token ids removed from input_ids to form the CTC grapheme targets. Pass the
-        # BOS / EOS ids: input_ids are [BOS, graphemes..., EOS], and the CTC head is
-        # trained on the bare grapheme sequence (same convention as the CTC encoder).
-        self.ctc_strip_ids = set(ctc_strip_ids)
-
-    def __call__(self, batch):
-        images = [ex["pixel_values"] for ex in batch]
-        token_seqs = [torch.as_tensor(ex["input_ids"], dtype=torch.long) for ex in batch]
-        B = len(batch)
-
-        # ---- Images ----
-        widths = [img.shape[-1] for img in images]
-        max_w = max(widths)
-        if max_w % self.downsample != 0:  # safety; should already be a multiple
-            max_w += self.downsample - (max_w % self.downsample)
-
-        padded_imgs = [F.pad(img, (0, max_w - w)) for img, w in zip(images, widths)]
-        pixel_values = torch.stack(padded_imgs, dim=0)  # (B, 1, H, max_w)
-
-        # Valid frame count per sample = real_width // downsample (ceil so a partial
-        # edge frame is counted as real, not padded).
-        input_lengths = torch.tensor(
-            [min((w + self.downsample - 1) // self.downsample, max_w // self.downsample) for w in widths],
-            dtype=torch.long,
-        )
-
-        # ---- Text (right-pad) ----
-        max_t = max(seq.shape[0] for seq in token_seqs)
-        input_ids = torch.full((B, max_t), self.pad_token_id, dtype=torch.long)
-        text_padding_mask = torch.zeros((B, max_t), dtype=torch.float)  # 1 = real
-        for i, seq in enumerate(token_seqs):
-            n = seq.shape[0]
-            input_ids[i, :n] = seq
-            text_padding_mask[i, :n] = 1.0
-
-        # ---- CTC targets: bare grapheme ids (BOS/EOS stripped), right-padded ----
-        # Padded with 0; only the first ctc_label_lengths[i] entries per row are read by
-        # nn.CTCLoss, so the pad value is irrelevant.
-        ctc_seqs = [
-            torch.as_tensor([t for t in seq.tolist() if t not in self.ctc_strip_ids],
-                            dtype=torch.long)
-            for seq in token_seqs
-        ]
-        ctc_label_lengths = torch.tensor([s.shape[0] for s in ctc_seqs], dtype=torch.long)
-        max_s = max(int(ctc_label_lengths.max().item()), 1)
-        ctc_labels = torch.zeros((B, max_s), dtype=torch.long)
-        for i, s in enumerate(ctc_seqs):
-            ctc_labels[i, :s.shape[0]] = s
-
-        return {
-            "pixel_values": pixel_values,
-            "input_ids": input_ids,
-            "input_lengths": input_lengths,
-            "text_padding_mask": text_padding_mask,
-            "ctc_labels": ctc_labels,
-            "ctc_label_lengths": ctc_label_lengths,
-        }
 
 
 # ============================================================================
@@ -497,18 +273,8 @@ class OCRCollator:
 #                keys/values
 #   'lm'      -> everything else in the decoder (token embeddings, self-attention, MLPs,
 #                layer norms, lm_head) — the pretrained language model
-LR_TIERS = ("encoder", "cross", "lm")
-_CROSS_KEYS = ("cross_attention_layer", "layer_norm1_5", "cross_attn_gate")
 
 
-def _param_tier(name: str) -> str:
-    if name.startswith("encoder_model."):
-        return "encoder"                                  # backbone + ctc_head
-    if name.startswith("enc_to_dec."):
-        return "cross"                                    # bridge feeds cross-attn K/V
-    if any(k in name for k in _CROSS_KEYS):
-        return "cross"                                    # cross-attention adapters
-    return "lm"                                           # rest of the decoder / LM
 
 
 
@@ -518,42 +284,6 @@ def _param_tier(name: str) -> str:
 # rides its own cosine curve between its configured max and min.
 
 
-class EncoderDecoderTrainer(Trainer):
-    """Trainer that builds the per-tier warmup->cosine-to-min_lr scheduler with the
-    step count Trainer computes (so we don't reason about DDP/epochs ourselves).
-
-    STAGE-2 (full end-to-end): the whole network trains, so the training forward runs
-    in the normal ``.train()`` mode — dropout / stochastic-depth (DropPath) stay ON for
-    regularization. (Stage-1 forced ``model.eval()`` inside ``compute_loss`` to keep the
-    frozen backbone deterministic while only the adapters warmed up; that mechanism is
-    removed here since nothing is frozen.)
-    """
-
-    def __init__(self, *args, warmup_steps=1500, **kwargs):
-        self._warmup_steps = warmup_steps
-        super().__init__(*args, **kwargs)
-
-    def create_scheduler(self, num_training_steps, optimizer=None):
-        if self.lr_scheduler is None:
-            self.lr_scheduler = build_scheduler(
-                optimizer or self.optimizer, self._warmup_steps, num_training_steps)
-        return self.lr_scheduler
-
-    def log(self, logs, *args, **kwargs):
-        # Surface the CE / CTC breakdown behind the combined training loss so it reaches
-        # the console and wandb alongside `loss`. Values are the last micro-batch's
-        # components (a close proxy for the logged running mean) — enough to watch how the
-        # two terms trade off while tuning ctc_loss_weight. Only added to TRAIN logs
-        # (gated on 'loss'), never eval logs.
-        if "loss" in logs:
-            core = self.model.module if hasattr(self.model, "module") else self.model
-            ce = getattr(core, "_ce_loss", None)
-            ctc = getattr(core, "_ctc_loss", None)
-            if ce is not None:
-                logs["ce_loss"] = float(ce)
-            if ctc is not None:
-                logs["ctc_loss"] = float(ctc)
-        return super().log(logs, *args, **kwargs)
 
 
 
@@ -800,7 +530,7 @@ if __name__ == '__main__':
                               IMAGE_COLUMN, TEXT_COLUMN)
 
     # BOS/EOS are stripped from input_ids to form the CTC grapheme targets.
-    data_collator = OCRCollator(pad_token_id=tokenizer.pad_token_id, downsample=DOWNSAMPLE,
+    data_collator = OCRCollator(emit_ctc=True, pad_token_id=tokenizer.pad_token_id, downsample=DOWNSAMPLE,
                                 ctc_strip_ids=(tokenizer.bos_token_id, tokenizer.eos_token_id))
 
     # ---- Optimizer (fresh, three LR tiers); scheduler built by EncoderDecoderTrainer ----
@@ -870,8 +600,11 @@ if __name__ == '__main__':
         optimizers=(optimizer, None),            # scheduler built by create_scheduler
         callbacks=[
             # Per-slice generate-based CER -> eval_<slice>_cer + macro eval_cer.
+            # STAGE-2 also reports the teacher-forced and CTC decoders, on the same
+            # images, so the three can be compared directly.
             CEREvalCallback(model, eval_slices, eval_preprocessor, tokenizer,
-                            image_col=IMAGE_COLUMN, text_col=TEXT_COLUMN),
+                            image_col=IMAGE_COLUMN, text_col=TEXT_COLUMN,
+                            report_tf=True, report_ctc=True),
             GradNormAlert(threshold=10.0),
         ],
         warmup_steps=WARMUP_STEPS,
