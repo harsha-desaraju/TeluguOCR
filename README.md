@@ -172,28 +172,17 @@ changing the source — never edit the bundle.
 
 ```
 src/telugu_ocr/
-  models/       image_encoder.py (conv-stem CTC) · text_decoder.py (GPT) · encoder_decoder.py
-  tokenizer/    grapheme.py · vocab.py · assets/ (the 2048-akshara vocabulary)
-  data/         preprocess.py (line geometry) · augment.py (degradation) · collators.py
-  training/     optim.py · trainer.py · callbacks.py · eval_slices.py · loops/
-  metrics/      errors.py (CER/AER) · normalize.py
-pipelines/      acquire/ · pages/ · synth/ · label/ · publish/ · wikisource/
-configs/        model + training configs, and checkpoints.yaml (the artifact registry)
-benchmark/      multi-engine scoring, plus engines_ext/ (Tesseract + PaddleOCR adapters)
-scripts/        bundle.py (standalone generator) · eval/ (diagnostic runners)
-tests/          the regression oracles
+  models/       
+  tokenizer/    
+  data/         
+  training/     
+  metrics/      
+pipelines/      
+configs/        
+benchmark/      
+scripts/        
+tests/          
 ```
-
-Two conventions worth knowing before changing anything:
-
-**Build models from `configs/`, never from the dataclass defaults.** The defaults describe
-no trained artifact — `CTCEncoderConfig` defaults to 1024px/128 frames while every
-checkpoint is 2048/256. Building from defaults fails on a tensor shape (encoder) or
-silently ignores 44 tensors (decoder). `configs/checkpoints.yaml` records which config
-reproduces which checkpoint.
-
-**There is one implementation of the line geometry** (`resize_line_image`). Getting
-preprocessing wrong is silent: no exception, no shape error, the model just reads badly.
 
 ## Tests
 
