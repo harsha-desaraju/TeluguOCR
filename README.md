@@ -8,6 +8,16 @@ real book scans it is trained and evaluated on.
 On a held-out set of **1,044 human-verified lines** from scanned Telugu books, it reads
 substantially better than the general-purpose OCR engines:
 
+![Grouped bar chart of character, akshara and word error rates for five OCR systems on 1,044 held-out Telugu lines. This model's two decoders are lowest in every group; the exact figures are in the table below.](benchmark/telugu_ocr_error_rates.png)
+
+![Horizontal bar chart of exact-line accuracy — the share of the 1,044 test lines transcribed with zero errors. This model leads by roughly 45 points; the exact figures are in the table below.](benchmark/telugu_ocr_exact_match.png)
+
+A **5.6× lower character error rate** than the strongest baseline, and 2.7× more lines
+read exactly right. Reproduce with `python3 -m benchmark.run_benchmark`.
+
+<details>
+<summary>The same numbers as a table</summary>
+
 | engine | CER ↓ | akshara ER ↓ | WER ↓ | exact lines ↑ |
 |---|---|---|---|---|
 | **ours** (joint CTC + LM rescoring) | **0.0119** | **0.0198** | **0.0953** | **71.7%** |
@@ -16,11 +26,12 @@ substantially better than the general-purpose OCR engines:
 | PaddleOCR 3.7 (`te`) | 0.0921 | 0.1384 | 0.4214 | 17.2% |
 | Surya | 0.0988 | 0.1354 | 0.3610 | 24.1% |
 
-That is a **5.6× lower character error rate** than the strongest baseline, and it gets
-2.7× more lines exactly right. Reproduce with `python3 -m benchmark.run_benchmark`.
+Baselines are given their best measured settings, not their defaults; see
+`TesseractEngine`'s docstring for the psm sweep behind that choice. Full per-engine
+breakdowns, including alignment counts and the top akshara confusions, are in
+`benchmark/benchmark_results.json`.
 
-<sub>Baselines are given their best measured settings, not their defaults; see
-`TesseractEngine`'s docstring for the psm sweep behind that choice.</sub>
+</details>
 
 ---
 
