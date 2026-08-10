@@ -12,32 +12,46 @@ trained in stages and orchestrated with the HuggingFace `Trainer`.
 ## Architecture (the three trained components)
 
 The final model is assembled in [src/telugu_ocr/models/encoder_decoder.py](src/telugu_ocr/models/encoder_decoder.py)
-(`EncoderDecoder`) by transferring weights from two independently pretrained models:
+(`EncoderDecoder`) from two independently pretrained models.
 
-1. **Image encoder** — a ViT Masked Auto-Encoder (`MaskedAutoEncoder` /
-   `ViTEncoder`) in [src/telugu_ocr/models/image_encoder.py](src/telugu_ocr/models/image_encoder.py).
-   Self-supervised pretraining reconstructs masked image patches. Input: grayscale
-   line images, height 64, patch size 8, variable width up to 1024.
+1. **Image encoder** — a **conv-stem CTC model** (`ImageEncoderCTC`) in
+   [src/telugu_ocr/models/image_encoder.py](src/telugu_ocr/models/image_encoder.py).
+   A six-stage convolutional stem collapses a grayscale line image to a sequence of
+   frames (height → 1, width ÷ 8), a 10-layer pre-LN transformer encodes them, and a
+   linear CTC head predicts a grapheme per frame. `embed_dim=384`, learned position
+   table of 256 frames, so **input is height 64, width up to 2048**.
+   *There is no ViT and no masked auto-encoder.* An earlier version of this project used
+   ViT-MAE pretraining; it was rejected (spec §11) and no MAE code remains.
 2. **Text decoder** — a GPT-style causal LM (`GPTModel`) in
-   [src/telugu_ocr/models/text_decoder.py](src/telugu_ocr/models/text_decoder.py) with SwiGLU MLPs, pretrained
-   on Telugu text. Uses a custom **grapheme (akshara) tokenizer**,
+   [src/telugu_ocr/models/text_decoder.py](src/telugu_ocr/models/text_decoder.py):
+   16 layers, `embed_dim=512`, SwiGLU MLPs, pretrained on Telugu text. It uses a custom
+   **grapheme (akshara) tokenizer**,
    [src/telugu_ocr/tokenizer/grapheme.py](src/telugu_ocr/tokenizer/grapheme.py) —
-   splits text into Unicode grapheme clusters via `regex.\X`, one cluster → one token
-   (no BPE).
-3. **Encoder-decoder** — `TextDecoder` adds **cross-attention** layers on top of the
-   pretrained GPT. Fine-tuning happens in two stages (`train_stage_1.py`,
-   `train_stage_2.py`): stage 1 typically freezes the pretrained encoder + decoder
-   weights and trains only the new cross-attention (`cross_attention`, `layer_norm1_5`);
-   stage 2 unfreezes more for end-to-end refinement.
+   `regex.\X` splits text into Unicode grapheme clusters, one cluster → one token, no
+   BPE. Vocabulary is 2048.
+3. **Encoder–decoder** — `TextDecoder` adds **cross-attention** on every second block of
+   the pretrained GPT, behind a zero-init tanh gate so the image contributes nothing at
+   initialisation and is phased in as the gate trains. A `enc_to_dec` linear bridges the
+   encoder's 384 dims to the decoder's 512.
 
-The `if __name__ == '__main__'` block in `encoder_decoder/model.py` documents the exact
-load → transfer → freeze → sanity-check recipe.
+Fine-tuning runs in two stages, both in
+[src/telugu_ocr/training/loops/encdec.py](src/telugu_ocr/training/loops/encdec.py),
+selected by `STAGE`:
+
+| | starts from | trains | objective |
+|---|---|---|---|
+| **stage 1** | the two pretrained checkpoints | the cross-attention adapters, their norms, the gates, the bridge | cross-entropy |
+| **stage 2** | stage 1's single checkpoint | everything, on three LR tiers | `CE + 0.3 × CTC` |
+
+Stage 1 runs its training forward in `.eval()` mode on purpose: the backbone is frozen,
+so its dropout and DropPath would inject noise into the features the adapters learn
+from. Stage 2 unfreezes and re-enables both.
+
+**`configs/checkpoints.yaml` is the registry** that says which config reproduces which
+checkpoint. The model dataclass defaults describe *no* trained artifact — build from the
+configs, never from the defaults.
 
 ## Repository layout
-
-> **Phase 2 note.** The paths below are current; the *architecture* section above still
-> describes a ViT-MAE encoder and is wrong (the trained encoder is a conv-stem CTC model).
-> Phase 5 of the package refactor rewrites it. See `docs/refactor/component_inventory.md`.
 
 - `src/telugu_ocr/models/` — `image_encoder.py` (conv-stem CTC), `text_decoder.py` (GPT),
   `encoder_decoder.py` (the combined OCR model).
@@ -62,21 +76,29 @@ load → transfer → freeze → sanity-check recipe.
 
 ## Conventions and gotchas
 
-- **Duplicated code is intentional.** Training scripts like
-  `encoder_decoder/train_stage_1.py`, `train_stage_2.py`, and
-  `image_encoder/single_train_file.py` **inline copies** of the model, tokenizer, and
-  utils rather than importing from `src/`. This is so each file is a self-contained
-  script that can be uploaded and run standalone on **Kaggle / Colab / remote GPUs**.
-  When you change core model logic, check whether the inlined copies also need updating.
-- **`.py` vs `.ipynb` pairs** — several components have both a script and a notebook
-  (`stage-1-finetuning.ipynb`, etc.); notebooks are the interactive/remote counterparts.
-- **Hardcoded absolute paths** — many scripts contain absolute paths like
-  `/Users/xai/Personal/Projects/TeluguOCR/models/...` and reference checkpoint dirs such
-  as `models/image_encoder/results (1)/telugu-vitmae/final_model.pt`. Expect to adjust
-  these per machine.
-- **Image preprocessing height must be 64.** The encoder's positional encoding is built
-  for `image_height // patch_size`, and collators assume a uniform batch height. Images
-  that aren't resized to height 64 will break batching/inference.
+- **Single-file training scripts are GENERATED, not hand-copied.** Kaggle and Colab take
+  one uploaded file, not a package. That constraint used to be met by inlining copies of
+  the model, tokenizer and utils into each training script — which produced 69 duplicated
+  top-level definitions, 41 of them silently drifted apart. The loops now import from the
+  package like normal code, and `scripts/bundle.py` generates the standalone file:
+
+      python3 scripts/bundle.py src/telugu_ocr/training/loops/encdec.py -o encdec_kaggle.py
+
+  **Never hand-edit a bundled file** — regenerate it. There is exactly one definition of
+  everything, in `src/telugu_ocr/`.
+- **Build models from `configs/`, never from the dataclass defaults.** The defaults
+  describe no trained artifact: `CTCEncoderConfig` defaults to 1024px/128 frames while
+  every checkpoint is 2048/256, and `GPTConfig` defaults shallower than the trained 16
+  layers. Building from defaults fails on one tensor's shape (encoder) or silently
+  ignores 44 tensors (decoder).
+- **Image preprocessing height must be 64,** and there is ONE implementation of the
+  geometry: `resize_line_image` in `src/telugu_ocr/data/preprocess.py`. Getting it wrong
+  is silent — no exception, no shape error, the model just reads badly. Note that the
+  training loops deliberately do NO resizing (`LineTensorizer`, `CTCBatchMapper`),
+  because their datasets already hold height-64 crops; resizing there would resample
+  twice.
+- **Hardcoded absolute paths** — many scripts contain paths like
+  `/kaggle/input/...` or `/Users/.../TeluguOCR/models/...`. Expect to adjust per machine.
 
 ## Environment & commands
 
@@ -84,10 +106,17 @@ load → transfer → freeze → sanity-check recipe.
   Install deps with `uv sync`. A `.venv/` is present.
 - Use **`python3`**, not `python` — `python` is not on PATH in this environment.
 - Run scripts from the repo root so `src...` imports resolve, e.g.
-  `python3 -m src.telugu_ocr.training.loops.encdec` (or run the self-contained inlined
-  scripts directly on a GPU host).
-- There is **no configured test runner or linter**. `test_model.py` files are ad-hoc
-  eval/visualization scripts, not a test suite.
+  `python3 -m src.telugu_ocr.training.loops.encdec` (or bundle it first for a GPU host).
+- **Regression checks** — no pytest runner, but these exist and should stay green:
+
+      python3 -m tests.test_checkpoint_compat   # models still match the checkpoints
+      python3 -m tests.micro_train_curve check  # training loss + CER unchanged
+      python3 -m tests.engine_equivalence check # OCR engines transcribe identically
+
+  Re-record a baseline only when a change is intentional and explained
+  (`... capture`, or `python3 -m tests.make_fingerprints`). Never regenerate one to
+  silence a failure you have not explained.
+- `scripts/eval/*.py` are ad-hoc diagnostic/visualisation runners, not tests.
 - Training relies on **`.env`** for secrets: `HF_TOKEN` (HuggingFace Hub) and
   `WANDB_API_KEY` (Weights & Biases logging). Never commit real values or print them.
 

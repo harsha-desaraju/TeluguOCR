@@ -1,9 +1,9 @@
 # Component inventory — what is duplicated, what has drifted, what is canonical
 
-> **PHASE 3 IS DONE except for two items — see `phase3_outcome.md` in this directory.**
-> Duplication went from 69 duplicated / 41 drifted definitions to 23 / 23, and the four
-> training loops from 6463 lines to 2484. What remains is the OCR-engine collapse and the
-> stage-1/stage-2 loop-body merge; both are scoped there with their oracles.
+> **THE REFACTOR IS COMPLETE (phases 0-5) — see `phase3_outcome.md` for the details.**
+> Duplication went from 69 duplicated / 41 drifted definitions to 17 / 17 (the remainder
+> being per-script `main` functions, not real duplication), and the training loops from
+> 6463 lines to 1277. `scripts/bundle.py` regenerates the standalone Kaggle file.
 >
 > **Paths in this document are PRE-REFACTOR and deliberately left that way.** It is a dated
 > record of the state phase 0 measured, and several of its claims are about files at their

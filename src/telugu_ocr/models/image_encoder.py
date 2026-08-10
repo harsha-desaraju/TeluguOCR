@@ -6,12 +6,12 @@ Implements the image encoder described in §2 of ``telugu_ocr_training_spec.md``
 a convolutional stem that tokenizes a grayscale line image, a pre-LN
 transformer encoder, and a linear CTC head over the grapheme vocabulary.
 
-This is a *new, from-scratch* architecture, distinct from the ViT-MAE in
-``model.py``. The spec (§11 decision log) explicitly rejects MAE pretraining /
-frozen-encoder CTC probing for this task; the encoder here is always trained
-end-to-end with the CTC objective.
+This replaced an earlier ViT Masked Auto-Encoder, which no longer exists anywhere in
+the repo. The spec (§11 decision log) rejected MAE pretraining and frozen-encoder CTC
+probing for this task; the encoder here is always trained end-to-end against the CTC
+objective.
 
-Shapes (input 1×64×W grayscale, W a multiple of 8, W ≤ 1024)::
+Shapes (input 1×64×W grayscale, W a multiple of 8, W ≤ max_image_width)::
 
     conv stem : (B, 1, 64, W)  ->  (B, 384, 1, W/8)  ->  (B, T=W/8, 384)
     transformer: (B, T, 384)   ->  (B, T, 384)
