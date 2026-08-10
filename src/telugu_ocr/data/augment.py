@@ -666,6 +666,19 @@ def _safe(applier, g):
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+# The two most expensive effects, as probabilities rather than literals.
+#
+# These were HALVED for the 2048-width training runs -- letterpress costs ~79ms/call and
+# bad-photocopy ~33ms/call, and between them they dominated the augmentation budget. The
+# halved values are the ones that actually trained every checkpoint in configs/, so they
+# are the defaults here; this module's copy had kept the original 0.06 / 0.05 and was
+# only ever consumed by the preview in __main__ below.
+#
+# Raising these costs throughput roughly linearly. Measure before changing them.
+P_LETTERPRESS = 0.03        # was 0.06 in the pre-phase-3 copy of this module
+P_BAD_PHOTOCOPY = 0.025     # was 0.05
+
+
 def degrade(img, severity=None):
     """Apply the full composed degradation to one line crop.
 
@@ -732,7 +745,7 @@ def degrade(img, severity=None):
                         octaves=random.choice([2, 2, 3]))
     if _scaled_p(0.30, s):
         g = _safe(_pick(_INK_MOTTLING, s), g)
-    if _scaled_p(0.06, s):
+    if _scaled_p(P_LETTERPRESS, s):
         g = _safe(_pick(_LETTERPRESS, s), g)          # rare: ~79ms/call
     # Catch over-erasure while the strokes still exist to be restored.
     g = _limit_ink_loss(g, ink_pre)
@@ -746,7 +759,7 @@ def degrade(img, severity=None):
         g = _safe(_pick(_BRIGHTNESS_TEXTURIZE, s), g)
     if _scaled_p(0.20, s):
         g = _safe(_pick(_DIRTY_DRUM, s), g)
-    if _scaled_p(0.05, s):
+    if _scaled_p(P_BAD_PHOTOCOPY, s):
         g = _safe(_pick(_BAD_PHOTOCOPY, s), g)        # rare: ~33ms/call
     if _scaled_p(0.25, s):
         g = illumination(g, random.uniform(8, 12 + 16 * s), random.choice(["x", "y"]))
