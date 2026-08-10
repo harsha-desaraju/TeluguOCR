@@ -53,181 +53,21 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
-def _to_pil(image) -> Image.Image:
-    """Accept a PIL image, a filesystem path, or a numpy array."""
-    if isinstance(image, Image.Image):
-        return image
-    if isinstance(image, (str, Path, os.PathLike)):
-        img = Image.open(image)
-        img.load()                      # decode now; the file handle is released
-        return img
-    if hasattr(image, "__array_interface__") or hasattr(image, "shape"):
-        return Image.fromarray(image)
-    raise TypeError(f"cannot interpret {type(image).__name__} as an image")
+from src.telugu_ocr.engines.base import OCREngine, to_pil as _to_pil
+from src.telugu_ocr.engines.paddle import PaddleOCREngine
+from src.telugu_ocr.engines.tesseract import TesseractEngine
 
 
-class OCREngine:
-    """Base class. Implement `_transcribe`; the contract is handled here."""
-
-    name = "base"
-    device_kind = "cpu"
-
-    def transcribe(self, images):
-        """image | list[image] -> str | list[str]. See the module docstring."""
-        single = isinstance(images, (Image.Image, str, Path, os.PathLike)) or not (
-            isinstance(images, (list, tuple)))
-        batch = [images] if single else list(images)
-        if not batch:
-            return [] if not single else ""
-
-        texts = self._transcribe([_to_pil(im) for im in batch])
-
-        # Normalise whatever the backend gave us to exactly one string per input.
-        if len(texts) != len(batch):
-            raise RuntimeError(
-                f"{self.name}: got {len(texts)} texts for {len(batch)} images")
-        texts = ["" if t is None else str(t) for t in texts]
-        return texts[0] if single else texts
-
-    # Callable form, so an engine can be passed anywhere a function is expected.
-    __call__ = transcribe
-
-    def _transcribe(self, images: list[Image.Image]) -> list[str]:
-        raise NotImplementedError
-
-    def close(self) -> None:
-        pass
 
 
 # ---------------------------------------------------------------------------
 # Tesseract
 # ---------------------------------------------------------------------------
-class TesseractEngine(OCREngine):
-    """Tesseract via pytesseract.
-
-    The defaults here differ from the rest of the repo, which uses `tel+eng` with psm 7.
-    Both of those settings cost Tesseract a lot of accuracy on these crops, and a
-    needlessly crippled baseline would flatter our model. Measured over 40 human-
-    reviewed lines (tesseract 5.5.0, normalized CER, lower is better):
-
-        tel      psm 13  up 2.0   0.130   <- default here
-        tel+eng  psm 13  up 2.0   0.205   adding `eng` hallucinates Latin onto Telugu
-        tel      psm  7  up 2.0   0.301
-        tel+eng  psm  7  up 2.0   0.370   <- the repo's usual setting
-        tel      psm  6  up 2.0   0.341
-
-    psm 7 ("single text line") is the documented choice for line crops and is what
-    consensus_labelling.py uses, but on this build it frequently returns NOTHING for a
-    Telugu line -- 7 of those 40 came back empty. psm 13 ("raw line") bypasses the
-    Tesseract-specific layout hacks and does not. Upscale barely matters (0.128-0.139
-    across 1x-3x); 2x is kept as a middle value.
-    """
-
-    name = "tesseract"
-
-    def __init__(self, lang: str = "tel", psm: int = 13, oem: int = 1,
-                 upscale: float = 2.0, num_threads: int = 8, timeout: int = 20):
-        import pytesseract
-
-        self._pt = pytesseract
-        self.lang = lang
-        self.config = f"--psm {psm} --oem {oem}"
-        self.upscale = upscale
-        self.num_threads = num_threads
-        self.timeout = timeout
-        self.n_failed = 0
-
-    def _one(self, img: Image.Image) -> str:
-        try:
-            im = img.convert("L")
-            if self.upscale and self.upscale != 1.0:
-                im = im.resize((max(1, int(im.width * self.upscale)),
-                                max(1, int(im.height * self.upscale))),
-                               Image.BICUBIC)
-            return self._pt.image_to_string(
-                im, lang=self.lang, config=self.config, timeout=self.timeout) or ""
-        except Exception:
-            self.n_failed += 1
-            return ""
-
-    def _transcribe(self, images: list[Image.Image]) -> list[str]:
-        with ThreadPoolExecutor(max_workers=self.num_threads) as pool:
-            return list(pool.map(self._one, images))
 
 
 # ---------------------------------------------------------------------------
 # PaddleOCR
 # ---------------------------------------------------------------------------
-class PaddleOCREngine(OCREngine):
-    """PaddleOCR, recognition only.
-
-    Detection is off on purpose: the inputs are already line crops, and letting the full
-    pipeline re-detect boxes inside a 64px strip invents sub-boxes and returns fragments
-    OUT OF READING ORDER, so joining them scrambles the line.
-
-    Telugu support is easy to miss -- paddleocr's `_utils/langs.py` lists only script
-    GROUPS, so grepping it suggests Telugu is absent. It is not: `te` resolves to
-    `te_PP-OCRv5_mobile_rec`, loaded by name here. Only the mobile variant exists.
-
-    Install (not present by default):
-        pip install "paddlepaddle==3.3.1" "paddleocr>=3.0"
-    """
-
-    name = "paddle"
-    device_kind = "gpu"
-
-    DEFAULT_MODEL = "te_PP-OCRv5_mobile_rec"
-
-    def __init__(self, model_name: str | None = None, lang: str = "te",
-                 batch_size: int = 32, **kwargs):
-        from paddleocr import TextRecognition
-
-        self.model_name = model_name or (self.DEFAULT_MODEL if lang == "te"
-                                         else f"{lang}_PP-OCRv5_mobile_rec")
-        try:
-            self._rec = TextRecognition(model_name=self.model_name, **kwargs)
-        except Exception as exc:
-            raise RuntimeError(
-                f"could not load PaddleOCR recognition model {self.model_name!r}: "
-                f"{exc}. Pass model_name= explicitly if this release names it "
-                f"differently.") from exc
-        self.batch_size = batch_size
-        self.n_failed = 0
-
-    @staticmethod
-    def _extract(res) -> str:
-        """Pull the text out of a paddleocr 3.x result object/dict."""
-        if res is None:
-            return ""
-        if isinstance(res, str):
-            return res
-        get = res.get if hasattr(res, "get") else (lambda k, d=None: getattr(res, k, d))
-        text = get("rec_text", None)
-        if text is None:
-            texts = get("rec_texts", None)
-            text = texts[0] if isinstance(texts, (list, tuple)) and texts else ""
-        return text or ""
-
-    def _transcribe(self, images: list[Image.Image]) -> list[str]:
-        import numpy as np
-
-        out: list[str] = []
-        for i in range(0, len(images), self.batch_size):
-            chunk = [np.array(im.convert("RGB")) for im in images[i:i + self.batch_size]]
-            try:
-                results = list(self._rec.predict(chunk))
-            except Exception as exc:
-                print(f"[{self.name}] batch of {len(chunk)} failed: {exc}")
-                self.n_failed += len(chunk)
-                out.extend([""] * len(chunk))
-                continue
-            texts = [self._extract(r) for r in results]
-            if len(texts) != len(chunk):        # be strict: never mis-align to inputs
-                print(f"[{self.name}] got {len(texts)} results for {len(chunk)} images")
-                self.n_failed += len(chunk)
-                texts = (texts + [""] * len(chunk))[:len(chunk)]
-            out.extend(texts)
-        return out
 
 
 # ---------------------------------------------------------------------------

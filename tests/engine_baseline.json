@@ -1,0 +1,29 @@
+{
+ "benchmark/engines.py (tel psm13)": {
+  "texts": [
+   "తెలుగు భాష",
+   "'అమీమ నానన,",
+   "పుసతకం చదుమ",
+   "శరరాిమ జయరామ,"
+  ],
+  "sha": "2d1355288bd9"
+ },
+ "consensus_labelling.py (tel psm-default)": {
+  "texts": [
+   "తేలుగు భాష",
+   "అమీమ నానన",
+   "పుసతకం చదుమ",
+   "శిరరూుమ జయరామ"
+  ],
+  "sha": "53e1a09501ce"
+ },
+ "single_engine_labelling.py (tel psm-default)": {
+  "texts": [
+   "తేలుగు భాష",
+   "అమీమ నానన",
+   "పుసతకం చదుమ",
+   "శిరరూుమ జయరామ"
+  ],
+  "sha": "53e1a09501ce"
+ }
+}

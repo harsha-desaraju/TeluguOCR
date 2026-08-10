@@ -44,6 +44,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 import regex
+from src.telugu_ocr.metrics.normalize import graphemes, normalize_nfc
 
 EMPTY = "∅"                      # stands in for "nothing" in a confusion pair
 _GRAPHEME = regex.compile(r"\X")
@@ -52,9 +53,9 @@ _GRAPHEME = regex.compile(r"\X")
 # ---------------------------------------------------------------------------
 # Tokenisation
 # ---------------------------------------------------------------------------
-def normalize(text) -> str:
-    """NFC + collapsed whitespace: compare characters, not spacing conventions."""
-    return " ".join(unicodedata.normalize("NFC", str(text)).split())
+# Shared with the rest of the repo since phase 3; see metrics/normalize.py for why the
+# pseudo-labeller's normaliser is deliberately NOT this one.
+normalize = normalize_nfc
 
 
 def to_chars(text) -> list[str]:
@@ -63,7 +64,7 @@ def to_chars(text) -> list[str]:
 
 def to_aksharas(text) -> list[str]:
     """Unicode grapheme clusters — the same split the model's tokenizer uses."""
-    return _GRAPHEME.findall(str(text))
+    return graphemes(str(text))
 
 
 def to_words(text) -> list[str]:
