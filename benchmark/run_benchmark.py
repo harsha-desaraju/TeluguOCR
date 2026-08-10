@@ -8,7 +8,7 @@ WHAT IS MEASURED
 THE REFERENCES
     A HuggingFace dataset -- by default harsha-desaraju/telugu-line-ocr-bench, split
     "test". Every row is a line crop whose transcription a human checked against the
-    image, published by data_curation/wikisource/push_eval_to_hub.py.
+    image, published by data_curation/wikisource/push_to_hub.py (WHICH="eval").
 
     Using the Hub copy rather than the local working directory means the benchmark is
     pinned to a published, versioned artifact: a result can be reproduced by anyone,
@@ -79,8 +79,8 @@ def load_bench(repo, split, token=None):
     """The published benchmark split from the Hub.
 
     Deduplication, empty-text removal and the human-verified filter all happened when
-    the dataset was built (data_curation/wikisource/push_eval_to_hub.py), so nothing is
-    re-derived here -- the published rows ARE the reference set. The guards in
+    the dataset was built (data_curation/wikisource/push_to_hub.py, WHICH="eval"), so
+    nothing is re-derived here -- the published rows ARE the reference set. The guards in
     select_samples remain only for things a consumer must still decide, like whether a
     given engine can encode a given image.
     """
@@ -371,7 +371,7 @@ if __name__ == "__main__":
 
     # ------------------------------- CONFIG -------------------------------
     # The published benchmark split (built by
-    # data_curation/wikisource/push_eval_to_hub.py from the hand-corrected lines).
+    # data_curation/wikisource/push_to_hub.py (WHICH="eval") from the hand-corrected lines).
     DATASET_REPO = "harsha-desaraju/telugu-line-ocr-bench"
     SPLIT = "test"
     HF_TOKEN = None       # None uses the cached login / HF_TOKEN env var; public repo
