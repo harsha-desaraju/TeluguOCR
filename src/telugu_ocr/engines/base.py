@@ -98,3 +98,13 @@ class OCREngine:
         cb = self._on_items
         if cb is not None:
             cb(k)
+
+    def close(self) -> None:
+        """Release whatever the backend is holding. Default: nothing to release.
+
+        benchmark/run_benchmark.py calls this on every engine after scoring it, so that
+        a GPU-backed engine frees its device memory before the next one loads. Engines
+        with nothing to free inherit the no-op -- which is the point of defining it here
+        rather than making the caller guess with hasattr.
+        """
+        return None

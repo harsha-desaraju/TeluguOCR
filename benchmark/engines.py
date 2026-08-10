@@ -13,7 +13,7 @@ THE CONTRACT
     an empty string, counted in `n_failed` -- so a benchmark loop cannot silently die on
     one corrupt crop.
 
-    Subclasses implement `_transcribe(list[Image.Image]) -> list[str]` only. The
+    Subclasses implement `run(list[Image.Image]) -> list[str]` only. The
     single-vs-list handling and the loading of paths/arrays live in the base class, so
     the contract is written once and cannot drift between engines.
 
@@ -172,7 +172,7 @@ class SuryaEngine(OCREngine):
             return " ".join(segs)
         return max(segs, key=len)
 
-    def _transcribe(self, images: list[Image.Image]) -> list[str]:
+    def run(self, images: list[Image.Image]) -> list[str]:
         out: list[str] = []
         for i in range(0, len(images), self.batch_size):
             chunk = [im.convert("RGB") for im in images[i:i + self.batch_size]]
@@ -279,7 +279,7 @@ class TeluguOCREngine(OCREngine):
         """False when the crop, scaled to height 64, exceeds the encoder's max width."""
         return img.width / max(img.height, 1) * 64 <= self.encoder_config.max_image_width
 
-    def _transcribe(self, images: list[Image.Image]) -> list[str]:
+    def run(self, images: list[Image.Image]) -> list[str]:
         import torch
 
         from scripts.eval.encoder_decoder import (

@@ -392,8 +392,10 @@ if __name__ == "__main__":
         # TesseractEngine's docstring for the measurements behind that.
         {"engine": "tesseract", "lang": "tel", "psm": 13, "upscale": 2.0},
         {"engine": "paddle", "lang": "te"},
-        # math_mode off, longest <br>-segment — see SuryaEngine for the measurements.
-        {"engine": "surya", "math_mode": False, "take": "longest"},
+        # surya-ocr cannot be a declared dependency (it pins pillow>=10.2,<11 against the
+        # rest of the stack), so it is benchmarked from a separate throwaway env and the
+        # rows merged with benchmark/merge_results.py. Uncomment there, not here.
+        # {"engine": "surya", "math_mode": False, "take": "longest"},
         {"engine": "model", "checkpoint": CKPT, "vocab_file": VOCAB_FILE,
          "decode": "ctc"},
         {"engine": "model", "checkpoint": CKPT, "vocab_file": VOCAB_FILE,
