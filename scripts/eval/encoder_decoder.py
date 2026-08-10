@@ -39,6 +39,7 @@ from src.telugu_ocr.models.encoder_decoder import EncoderDecoder
 from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
 from src.telugu_ocr.models.text_decoder import GPTConfig
 from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
+from src.telugu_ocr.data.preprocess import resize_line_image
 
 
 # ============================================================================
@@ -53,17 +54,22 @@ _TO_TENSOR = transforms.Compose([
 ])
 
 
-def preprocess_image(img: Image.Image, image_height: int = 64, downsample: int = 8) -> torch.Tensor:
-    img = img.convert("L")
-    if img.height != image_height:
-        new_w = max(downsample, round(img.width * image_height / img.height))
-        img = img.resize((new_w, image_height), Image.LANCZOS)
-    if img.width % downsample != 0:
-        pad = downsample - img.width % downsample
-        padded = Image.new("L", (img.width + pad, image_height), color=255)
-        padded.paste(img, (0, 0))
-        img = padded
-    return _TO_TENSOR(img)  # (1, H, W)
+def preprocess_image(img: Image.Image, image_height: int = 64,
+                     downsample: int = 8, max_image_width: int = 2048) -> torch.Tensor:
+    """Line image -> normalized tensor (1, H, W), via the shared geometry.
+
+    CHANGED IN PHASE 3, and it moves numbers. This used to be a private copy that
+    resampled with LANCZOS and had no over-wide branch, while every other path in the
+    repo -- the pseudo-labeller, the wikisource segmenter, the synth pipeline and the
+    encoder's own ImagePreprocessor -- used BILINEAR with the width cap. Since
+    benchmark/engines.py imports THIS function for the TeluguOCREngine, the benchmark
+    was scoring the model on pixels no training path ever produced, while
+    benchmark/metrics.py documented its numbers as comparable with this script's.
+
+    Standardised on BILINEAR so eval mirrors training. Expect published CER to shift
+    slightly; that shift is the measurement error being removed, not introduced.
+    """
+    return resize_line_image(img, image_height, max_image_width, downsample, out="pt")
 
 
 # ============================================================================

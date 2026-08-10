@@ -1126,31 +1126,7 @@ def make_augmenter(p_clean=P_CLEAN, severity=None):
 # ============================================================================
 # Preprocessing + collator
 # ============================================================================
-class ImagePreprocessor:
-    """grayscale + to-tensor + normalize; optional augment on the RGB crop (train)."""
-
-    def __init__(self, tokenizer, image_col, text_col, augment_fn=None):
-        self.tokenizer = tokenizer
-        self.image_col = image_col
-        self.text_col = text_col
-        self.augment_fn = augment_fn  # train split only; augmentation pipeline UNCHANGED
-        self.to_tensor = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5]),
-        ])
-
-    def _img(self, img):
-        if self.augment_fn is not None:
-            arr = self.augment_fn(np.array(img.convert("RGB")))
-            img = Image.fromarray(np.asarray(arr, dtype=np.uint8))
-        return self.to_tensor(img.convert("L"))
-
-    def __call__(self, batch):
-        return {
-            "line_image": [self._img(im) for im in batch[self.image_col]],
-            "target_ids": [self.tokenizer(t, add_special_tokens=False)["input_ids"]
-                           for t in batch[self.text_col]],
-        }
+from src.telugu_ocr.data.collators import CTCBatchMapper
 
 
 class CTCCollator:
@@ -1446,9 +1422,9 @@ if __name__ == "__main__":
     print(f"[model] params {n_params:,} (~{n_params/1e6:.1f}M) | max_frames {cfg.max_frames}")
 
     # ---- Data: NORMAL (downloaded, map-style) train + validation ----
-    train_preprocessor = ImagePreprocessor(tokenizer, IMAGE_COLUMN, TEXT_COLUMN,
+    train_preprocessor = CTCBatchMapper(tokenizer, IMAGE_COLUMN, TEXT_COLUMN,
                                            augment_fn=make_augmenter())  # train aug
-    eval_preprocessor = ImagePreprocessor(tokenizer, IMAGE_COLUMN, TEXT_COLUMN, augment_fn=None)
+    eval_preprocessor = CTCBatchMapper(tokenizer, IMAGE_COLUMN, TEXT_COLUMN, augment_fn=None)
 
     # Train: whole split downloaded to disk, transformed lazily via with_transform.
     # Trainer's sampler shuffles each epoch, so no manual shuffle is needed.

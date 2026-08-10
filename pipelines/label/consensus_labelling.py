@@ -168,6 +168,7 @@ from pathlib import Path
 import numpy as np
 import regex
 from PIL import Image
+from src.telugu_ocr.data.preprocess import resize_line_image
 
 # `src...` must be importable: the engines load the model and tokenizer from the repo.
 # Locally that is this file's own repo root; on Kaggle the repo is attached as a Dataset,
@@ -566,29 +567,12 @@ def preprocess_for_ctc(img: Image.Image, image_height: int = 64,
     """Grayscale -> height `image_height` (aspect preserved) -> width padded to a multiple
     of `downsample`, white fill. Returns float32 in [-1, 1], shape (1, H, W).
 
-    Mirrors ImagePreprocessor in src/telugu_ocr/data/preprocess.py, including the
-    over-wide branch: past `max_image_width` the scale is driven by width instead and the
-    height shortfall is padded, rather than squashing the glyphs horizontally. Getting this
-    wrong is silent -- the model just reads badly -- so keep it in sync.
+    The geometry is `resize_line_image`, shared with every other caller since phase 3 --
+    it used to be a hand-copy that had to be "kept in sync", which is what let seven
+    copies drift. Only the return convention is local: a normalized ndarray with a
+    channel dim, because the batching below sorts on `.shape[2]` and stacks with numpy.
     """
-    im = img.convert("L")
-    w, h = im.size
-    scale = image_height / h
-    if scale * w > max_image_width:
-        scale = max_image_width / w
-        target_h = max(1, int(scale * h))
-        im = im.resize((max_image_width, target_h), Image.BILINEAR)
-        pad_top = (image_height - target_h) // 2
-        pad_bottom = image_height - target_h - pad_top
-        arr = np.asarray(im, dtype=np.uint8)
-        arr = np.pad(arr, ((pad_top, pad_bottom), (0, 0)), constant_values=255)
-    else:
-        im = im.resize((max(1, int(scale * w)), image_height), Image.BILINEAR)
-        arr = np.asarray(im, dtype=np.uint8)
-
-    pad_w = (-arr.shape[1]) % downsample
-    if pad_w:
-        arr = np.pad(arr, ((0, 0), (0, pad_w)), constant_values=255)
+    arr = resize_line_image(img, image_height, max_image_width, downsample, out="np")
     x = arr.astype(np.float32) / 255.0
     return ((x - 0.5) / 0.5)[None, ...]
 

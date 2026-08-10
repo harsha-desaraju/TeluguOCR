@@ -40,6 +40,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 from PIL import Image
+from src.telugu_ocr.data.preprocess import resize_line_image
 
 
 # ======================================================================================
@@ -134,35 +135,15 @@ def preprocess_line(img: Image.Image, height: int = 64, max_width: int = 2048,
     """A line crop in the form the encoder consumes: grayscale uint8, fixed height,
     width padded to a multiple of `downsample`.
 
-    Mirrors ImagePreprocessor in src/telugu_ocr/data/preprocess.py, including the over-wide
-    branch: past `max_width` the scale is driven by width instead and the height
-    shortfall is padded, rather than squashing the glyphs horizontally. Getting that
-    wrong is silent -- the model just reads badly -- so keep it in sync.
+    The geometry is `resize_line_image`, shared with every other caller since phase 3
+    rather than hand-copied and "kept in sync".
 
     Storing crops in this form rather than as cut has two payoffs: the dataset is a
     quarter the size, and the stored bytes are provably the pixels the recogniser saw
     when it judged the label. It is also idempotent, so running the encoder's own
     preprocessing over a stored crop is a no-op rather than a second resample.
     """
-    im = img.convert("L")
-    w, h = im.size
-    scale = height / h
-    if scale * w > max_width:
-        scale = max_width / w
-        target_h = max(1, int(scale * h))
-        im = im.resize((max_width, target_h), Image.BILINEAR)
-        arr = np.asarray(im, dtype=np.uint8)
-        pad_top = (height - target_h) // 2
-        arr = np.pad(arr, ((pad_top, height - target_h - pad_top), (0, 0)),
-                     constant_values=255)
-    else:
-        im = im.resize((max(1, int(scale * w)), height), Image.BILINEAR)
-        arr = np.asarray(im, dtype=np.uint8)
-
-    pad_w = (-arr.shape[1]) % downsample
-    if pad_w:
-        arr = np.pad(arr, ((0, 0), (0, pad_w)), constant_values=255)
-    return arr
+    return resize_line_image(img, height, max_width, downsample, out="np")
 
 
 def encode_jpeg(arr: np.ndarray, quality: int = 90) -> bytes:

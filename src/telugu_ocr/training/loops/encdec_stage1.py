@@ -46,41 +46,7 @@ from transformers import PreTrainedTokenizer
 
 # Encoder model utils
 
-class ImagePreprocessor:
-    """
-    Preprocesses the image before encoding the image
-    1) Change the image to gray scale
-    2) Resize the image
-    3) Pad the image to the nearest multiple of patch size
-    4) Normalize the image
-    """
-
-    def __init__(self, image_height: int, max_image_width: int, patch_size: int, augment_fn=None):
-        assert image_height % patch_size == 0, "Image height should be a multiple of patch size"
-        self.image_height = image_height
-        self.max_image_width = max_image_width
-        self.patch_size = patch_size
-        # augment_fn: train split only; runs on the RGB crop before grayscale. The
-        # augmentation pipeline is inlined verbatim from the CTC encoder training file.
-        self.augment_fn = augment_fn
-        self.to_tensor = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
-        ])
-
-    def _transform(self, img: Image.Image) -> torch.Tensor:
-        # Optional augmentation on the RGB crop (train split only).
-        if self.augment_fn is not None:
-            arr = self.augment_fn(np.array(img.convert("RGB")))
-            img = Image.fromarray(np.asarray(arr, dtype=np.uint8))
-
-        # Convert to GrayScale
-        img = img.convert('L')
-
-        return self.to_tensor(img)
-
-    def __call__(self, img: Image.Image) -> torch.Tensor:
-        return self._transform(img)
+from src.telugu_ocr.data.collators import LineTensorizer
 
 
 # ============================================================================
@@ -1906,9 +1872,8 @@ if __name__ == '__main__':
     set_seed(SEED)                   # reproducible augmentation (random + np.random)
 
     # ---- Preprocessors: train augmented (composed degrade pipeline), eval clean ----
-    train_preprocessor = ImagePreprocessor(
-        IMAGE_HEIGHT, MAX_IMAGE_WIDTH, DOWNSAMPLE, augment_fn=make_augmenter())
-    eval_preprocessor = ImagePreprocessor(IMAGE_HEIGHT, MAX_IMAGE_WIDTH, DOWNSAMPLE)
+    train_preprocessor = LineTensorizer(augment_fn=make_augmenter())
+    eval_preprocessor = LineTensorizer()
 
 
     def make_sample_transformer(preprocessor):

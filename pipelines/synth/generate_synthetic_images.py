@@ -65,6 +65,7 @@ print(f"{len(font_names)} fonts total | train: {len(train_fonts)} "
 # Render one line of text to an auto-sized PIL image (from image-generation.ipynb).
 # --------------------------------------------------------------------------------------
 from PIL import Image, ImageDraw, ImageFont
+from src.telugu_ocr.data.preprocess import resize_line_image
 
 
 def generate_image(text, font_path, font_size: int = 40, margin: int = 5,
@@ -103,10 +104,12 @@ def generate_image(text, font_path, font_size: int = 40, margin: int = 5,
 
 
 class ImagePreprocessor:
-    """Preprocess a line image before encoding (no tensor conversion):
-    1) convert to grayscale
-    2) resize to `image_height`, preserving aspect ratio (capped at `max_image_width`)
-    3) pad to the nearest multiple of patch size (fill=255)."""
+    """Line image -> preprocessed PIL image (no tensor conversion).
+
+    Same geometry as the encoder's own preprocessing -- it is literally the same
+    function since phase 3 -- but returns PIL, because this pipeline writes the crops
+    out as image files rather than feeding them to a model.
+    """
 
     def __init__(self, image_height: int, max_image_width: int, patch_size: int):
         assert image_height % patch_size == 0, "Image height should be a multiple of patch size"
@@ -115,29 +118,8 @@ class ImagePreprocessor:
         self.patch_size = patch_size
 
     def _transform(self, img: Image.Image) -> Image.Image:
-        # Convert to GrayScale
-        img = img.convert('L')
-
-        # Calculate the resize target for the image while preserving the aspect ratio
-        img_w, img_h = img.size
-        scale_factor = self.image_height / img_h
-        if scale_factor * img_w > self.max_image_width:
-            scale_factor = self.max_image_width / img_w
-            target_size = (int(scale_factor * img_h), self.max_image_width)
-            diff = self.image_height - target_size[0]
-            pad_t, pad_b = diff // 2, diff - diff // 2
-            pad_l, pad_r = 0, 0
-        else:
-            target_size = (self.image_height, int(scale_factor * img_w))
-            # Find the nearest multiple of patch size for padding
-            diff = (-target_size[1]) % self.patch_size
-            pad_l, pad_r = 0, diff
-            pad_t, pad_b = 0, 0
-
-        img = transforms.Resize(target_size)(img)
-        img = transforms.Pad((pad_l, pad_t, pad_r, pad_b), fill=255)(img)
-
-        return img
+        return resize_line_image(img, self.image_height, self.max_image_width,
+                                 self.patch_size, out="pil")
 
     def __call__(self, img: Image.Image) -> Image.Image:
         return self._transform(img)
