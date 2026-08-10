@@ -1,24 +1,72 @@
 [project]
 name = "teluguocr"
 version = "0.1.0"
-description = "Add your description here"
+description = "Telugu OCR: a ViT-MAE image encoder + grapheme-tokenizer GPT decoder trained from scratch to read Telugu text lines"
 readme = "README.md"
 requires-python = ">=3.12"
+# Floors are the versions this project is known to run on -- they match what the working
+# .venv actually has installed, so `uv sync` reproduces a working environment rather than
+# jumping to untested majors. Three of them used to disagree with reality and are fixed:
+# tokenizers was pinned ==0.22.1 while 0.21.4 was installed (and the pin dragged
+# transformers down to 2.3.0 during resolution, because 4.53 requires tokenizers<0.22);
+# pillow claimed >=12 with 10.4 installed; huggingface-hub claimed >=1.1.2 with 0.36
+# installed. See uv.lock for the exact resolved set.
 dependencies = [
+    # --- model + training ---
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+    # Capped below 5: the training scripts are built on the 4.x Trainer /
+    # TrainingArguments / PreTrainedTokenizer API. Lifting this cap is a deliberate
+    # migration, not a routine bump -- do it on its own branch and re-run a short
+    # fine-tune before trusting it.
+    "transformers>=4.53.3,<5",
+    "tokenizers>=0.21.4",
+    "safetensors>=0.8.0",
     "datasets>=4.4.1",
-    "easyocr>=1.7.2",
-    "fastparquet>=2024.11.0",
-    "huggingface-hub>=1.1.2",
-    "joblib>=1.5.2",
-    "matplotlib>=3.10.7",
+    "huggingface-hub>=0.36.2",
+    "wandb>=0.27.0",
+    # --- text, tokenization, metrics ---
+    "regex>=2025.11.3",
+    "rapidfuzz>=3.14.5",
+    # --- images + augmentation ---
+    "pillow>=10.4.0",
     "numpy>=2.3.4",
-    "openai>=2.8.1",
-    "pandas>=2.3.3",
-    "peft>=0.18.0",
-    "pillow>=12.0.0",
-    "playwright>=1.55.0",
-    "protobuf>=6.33.2",
-    "pyarrow>=22.0.0",
+    "opencv-python>=5.0.0.93",
+    "scikit-image>=0.25.2",
+    "augraphy>=8.2.6",
+    "deskew>=1.6.0",
+    # --- OCR engines (pseudo-labelling + benchmarking) ---
     "pytesseract>=0.3.13",
-    "tokenizers==0.22.1",
+    "paddleocr>=3.7.0",
+    "paddlepaddle>=3.3.1",
+    # --- PDFs, scraping, page acquisition ---
+    "pymupdf>=1.27.2.3",
+    "pdf2image>=1.17.0",
+    "pypdf>=6.10.2",
+    "beautifulsoup4>=4.14.3",
+    "requests>=2.32.5",
+    "httpx>=0.28.1",
+    "trafilatura>=2.0.0",
+    # --- data handling, reporting, annotation UI ---
+    "pandas>=2.3.3",
+    "pyarrow>=22.0.0",
+    "matplotlib>=3.10.7",
+    "joblib>=1.5.2",
+    "tqdm>=4.67.1",
+    "python-dotenv>=1.2.2",
+    # Capped below 6: gradio 6 requires huggingface-hub>=1.16, and every transformers 4.x
+    # requires hub<1.0 -- so gradio 6 and the 4.x training stack cannot coexist. The
+    # annotation tool uses only stock Blocks widgets (Markdown/State/HTML/Row/Column/
+    # Radio/Slider/Textbox/Button/Number), all unchanged in 5.x, so capping the UI is far
+    # cheaper than migrating Trainer. Note the current .venv has gradio 6.22 installed
+    # WITH hub 0.36, which violates gradio's own requirement -- `uv sync` corrects that.
+    "gradio>=5.49.1,<6",
+    "ipython>=9.9.0",
+    "protobuf>=6.33.2",
 ]
+
+# surya-ocr is deliberately NOT declared. benchmark/engines.py imports it lazily inside
+# SuryaEngine.__init__ precisely because it cannot coexist here: every release requires
+# pillow>=10.2,<11, so adding it either caps pillow below what the rest of the stack wants
+# or fails to resolve outright. Benchmark it from a separate throwaway environment and
+# merge the JSON with benchmark/merge_results.py.
