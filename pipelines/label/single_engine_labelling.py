@@ -85,8 +85,7 @@ except ImportError:
 # ======================================================================================
 # Tesseract (recognition + per-word confidence), one thread per in-flight crop
 # ======================================================================================
-from benchmark.engines_ext.paddle import PaddleOCREngine
-from benchmark.engines_ext.tesseract import TesseractEngine
+from benchmark.engines import PaddleOCREngine, TesseractEngine
 
 
 # ======================================================================================

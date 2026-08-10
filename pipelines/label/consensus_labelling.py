@@ -375,9 +375,7 @@ class EngineResult:
     scores: list[float | None] | None = None
 
 
-from benchmark.engines_ext.base import OCREngine
-from benchmark.engines_ext.paddle import PaddleOCREngine
-from benchmark.engines_ext.tesseract import TesseractEngine
+from benchmark.engines import OCREngine, PaddleOCREngine, TesseractEngine
 
 
 # --------------------------------------------------------------------------------------

@@ -37,6 +37,21 @@ ENGINES
                       The decoding itself is imported from
                       scripts/eval/encoder_decoder.py rather than re-implemented, so
                       this benchmark and that script cannot drift apart.
+
+WHAT IS IN HERE
+    The shared `OCREngine` contract, the third-party adapters (Tesseract, PaddleOCR,
+    Surya) and the wrapper around this repo's own model. One file, as it was before the
+    phase-3 refactor -- every heavy import (torch, paddleocr, surya, pytesseract) is
+    lazy, inside the method that needs it, so importing this module is cheap and costs
+    nothing if a given backend is not installed.
+
+    NOTE ON LAYERING. `pipelines/label/` imports TesseractEngine / PaddleOCREngine from
+    here for consensus pseudo-labelling, so the labelling pipeline depends on
+    benchmark/. That is the wrong direction for a data pipeline and it is a deliberate
+    trade: these adapters are not part of the model (src/telugu_ocr/ imports nothing
+    from them) and keeping them in one place beat spreading them over a third top-level
+    package. If pipelines/ ever has to run somewhere benchmark/ is not available, this
+    is the seam to cut.
 """
 
 from __future__ import annotations
@@ -48,14 +63,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
-from benchmark.engines_ext.base import OCREngine, to_pil as _to_pil
-from benchmark.engines_ext.paddle import PaddleOCREngine
-from benchmark.engines_ext.tesseract import TesseractEngine
 
 
 
@@ -74,6 +87,269 @@ from benchmark.engines_ext.tesseract import TesseractEngine
 # Surya
 # ---------------------------------------------------------------------------
 
+
+
+# --------------------------------------------------------------------------
+# The shared contract
+# --------------------------------------------------------------------------
+def to_pil(image) -> Image.Image:
+    """Accept a PIL image, a filesystem path, or a numpy array."""
+    if isinstance(image, Image.Image):
+        return image
+    if isinstance(image, (str, Path, os.PathLike)):
+        img = Image.open(image)
+        img.load()                      # decode now; the file handle is released
+        return img
+    if hasattr(image, "__array_interface__") or hasattr(image, "shape"):
+        return Image.fromarray(image)
+    raise TypeError(f"cannot interpret {type(image).__name__} as an image")
+
+
+_to_pil = to_pil          # the name benchmark/engines.py used
+
+
+class OCREngine:
+    """Base class. Implement `run`; `transcribe` is derived from it.
+
+    `device_kind` decides scheduling: 'gpu' engines are serialised against each other,
+    'cpu' engines all run concurrently.
+    """
+
+    name: str = "base"
+    device_kind: str = "cpu"
+    # Set by run_engines; call self._tick(k) after finishing k images so the progress bar
+    # advances DURING a chunk instead of jumping once at the end of it.
+    _on_items = None
+
+    def run(self, images: list[Image.Image]):
+        """list[PIL] -> list[str | None], or (list[str | None], list[float]).
+
+        None means this engine failed on that image, which is NOT the same as reading it
+        as empty -- consensus must be able to tell those apart.
+        """
+        raise NotImplementedError
+
+    def transcribe(self, images):
+        """image | list[image] -> str | list[str]. Failures become "".
+
+        The benchmark's contract: accepts a single image or a batch, accepts paths and
+        arrays as well as PIL, and always returns plain strings.
+        """
+        single = isinstance(images, (Image.Image, str, Path, os.PathLike)) or not (
+            isinstance(images, (list, tuple)))
+        batch = [images] if single else list(images)
+        if not batch:
+            return "" if single else []
+
+        texts = self.run([to_pil(im) for im in batch])
+        if isinstance(texts, tuple):        # (texts, scores) -> drop the scores
+            texts = texts[0]
+
+        if len(texts) != len(batch):
+            raise RuntimeError(
+                f"{self.name}: got {len(texts)} texts for {len(batch)} images")
+        texts = ["" if t is None else str(t) for t in texts]
+        return texts[0] if single else texts
+
+    # Callable form, so an engine can be passed anywhere a function is expected.
+    __call__ = transcribe
+
+    def _tick(self, k: int = 1) -> None:
+        """Report k finished images. Safe to call from worker threads, and a no-op when
+        no progress sink is attached, so engines can call it unconditionally."""
+        cb = self._on_items
+        if cb is not None:
+            cb(k)
+
+    def close(self) -> None:
+        """Release whatever the backend is holding. Default: nothing to release.
+
+        benchmark/run_benchmark.py calls this on every engine after scoring it, so that
+        a GPU-backed engine frees its device memory before the next one loads. Engines
+        with nothing to free inherit the no-op -- which is the point of defining it here
+        rather than making the caller guess with hasattr.
+        """
+        return None
+
+
+# --------------------------------------------------------------------------
+# Tesseract
+# --------------------------------------------------------------------------
+class TesseractEngine(OCREngine):
+    """Tesseract on line crops, one thread per in-flight crop.
+
+    Two settings matter, and the second one is measured rather than assumed:
+
+    * upscaling. Tesseract wants roughly 30-35px of x-height; a 64px line crop sits at
+      the bottom of its comfortable range, and a 2x cubic upscale measurably helps.
+      Beyond that it barely moves (0.128-0.139 CER across 1x-3x), so 2x is the default.
+
+    * `psm`, and THE DEFAULT HERE IS NOT THE BEST ONE. Measured over 40 human-reviewed
+      lines (tesseract 5.5.0, normalized CER, lower is better):
+
+          tel      psm 13  up 2.0   0.130
+          tel+eng  psm 13  up 2.0   0.205     adding `eng` hallucinates Latin onto Telugu
+          tel      psm  7  up 2.0   0.301     <- the default below
+          tel+eng  psm  7  up 2.0   0.370
+          tel      psm  6  up 2.0   0.341
+
+      psm 7 ("single text line") is the documented choice for line crops, but on this
+      build it frequently returns NOTHING for a Telugu line -- 7 of those 40 came back
+      empty -- and is 2.3x worse than psm 13 ("raw line"), which bypasses the
+      Tesseract-specific layout hacks.
+
+      The default stays 7 because the pseudo-labelling pipelines relied on it and every
+      label they have already written was produced with it; changing it silently would
+      make new labels inconsistent with old ones. The benchmark passes psm=13
+      explicitly, so its baseline is not crippled. Consider moving the labellers to 13
+      as a deliberate step, with a re-label.
+    """
+
+    name = "tesseract"
+    device_kind = "cpu"
+
+    def __init__(self, lang: str = "tel", psm: int = 7, oem: int = 1,
+                 upscale: float = 2.0, num_threads: int = 8, timeout: int = 20):
+        import pytesseract
+
+        self._pt = pytesseract
+        self.lang = lang
+        self.config = f"--psm {psm} --oem {oem}"
+        self.upscale = upscale
+        self.num_threads = num_threads
+        self.timeout = timeout
+        self.n_failed = 0
+
+    def _one(self, img: Image.Image) -> str | None:
+        try:
+            im = img.convert("L")
+            if self.upscale and self.upscale != 1.0:
+                im = im.resize((max(1, int(im.width * self.upscale)),
+                                max(1, int(im.height * self.upscale))),
+                               Image.BICUBIC)
+            return self._pt.image_to_string(im, lang=self.lang, config=self.config,
+                                            timeout=self.timeout)
+        except Exception:
+            # None, not "": the labeller must be able to tell a failed engine apart from
+            # one that genuinely read nothing. transcribe() coerces it to "" for the
+            # benchmark, which does not make that distinction.
+            self.n_failed += 1
+            return None
+        finally:
+            self._tick(1)
+
+    def run(self, images: list[Image.Image]) -> list[str | None]:
+        with ThreadPoolExecutor(max_workers=self.num_threads) as pool:
+            return list(pool.map(self._one, images))
+
+
+# --------------------------------------------------------------------------
+# PaddleOCR
+# --------------------------------------------------------------------------
+class PaddleOCREngine(OCREngine):
+    """PaddleOCR recognition-only.
+
+    Detection is switched OFF on purpose: the inputs are already line crops, so letting
+    Paddle re-detect boxes inside a 64px strip only invents sub-boxes and drops text.
+
+    Uses paddleocr 3.x `TextRecognition` with the Telugu recognition model directly,
+    rather than the full `PaddleOCR` pipeline. That skips detection entirely, which is what
+    you want here: the inputs are already line crops, and letting the pipeline re-detect
+    boxes inside one strip invents sub-boxes and returns the fragments OUT OF READING
+    ORDER, so naively joining them silently scrambles the text.
+
+    Telugu support is real but easy to miss: paddleocr's `_utils/langs.py` only lists the
+    script GROUPS (latin/arabic/cyrillic/devanagari), so grepping it suggests Telugu is
+    absent. It is not -- `lang="te"` resolves through the model registry to
+    `te_PP-OCRv5_mobile_rec`, which is what this engine loads by name. Only the mobile
+    variant exists; there is no `te_PP-OCRv5_server_rec`.
+
+    `predict` also returns a per-line confidence, which is recorded alongside the text --
+    a cheap extra filter for pseudo-labels.
+
+    Verified against paddleocr 3.7.0 / paddle 3.3.1.
+    """
+
+    name = "paddle"
+    device_kind = "gpu"          # assume GPU; harmless if it falls back to CPU
+
+    DEFAULT_MODEL = "te_PP-OCRv5_mobile_rec"
+
+    def __init__(self, model_name: str | None = None, lang: str = "te",
+                 batch_size: int = 32, device: str | None = None, **kwargs):
+        from paddleocr import TextRecognition
+
+        self.model_name = model_name or (self.DEFAULT_MODEL if lang == "te"
+                                         else f"{lang}_PP-OCRv5_mobile_rec")
+        # Pin paddle to a specific GPU on multi-GPU hosts, e.g. device="gpu:0" while our
+        # torch model takes cuda:1. Passed straight through to TextRecognition, and also
+        # kept on the instance so run_engines can tell whether two GPU engines collide.
+        self.device = device
+        if device is not None:
+            kwargs.setdefault("device", device)
+        try:
+            self._rec = TextRecognition(model_name=self.model_name, **kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                f"could not load PaddleOCR recognition model {self.model_name!r}: {exc}. "
+                f"Pass model_name= explicitly if this release names it differently."
+            ) from exc
+        self.batch_size = batch_size
+        # Scheduling honesty: the GPU lock exists to stop two GPU engines fighting over the
+        # device. When paddle is running on CPU (no CUDA build / no device) holding that lock
+        # only serializes it against our model for no reason, so declare what it really is.
+        try:
+            import paddle
+            self.device_kind = ("gpu" if paddle.device.is_compiled_with_cuda()
+                                and paddle.device.cuda.device_count() > 0 else "cpu")
+        except Exception:
+            self.device_kind = "cpu"
+
+    @staticmethod
+    def _extract(res) -> tuple[str, float]:
+        """Pull (text, score) out of a paddleocr 3.x result object/dict."""
+        if res is None:
+            return "", 0.0
+        if isinstance(res, str):
+            return res, 0.0
+        get = res.get if hasattr(res, "get") else (lambda k, d=None: getattr(res, k, d))
+        text = get("rec_text", None)
+        if text is None:
+            texts = get("rec_texts", None)
+            text = texts[0] if isinstance(texts, (list, tuple)) and texts else ""
+        score = get("rec_score", None)
+        if score is None:
+            scores = get("rec_scores", None)
+            score = scores[0] if isinstance(scores, (list, tuple)) and scores else 0.0
+        return (text or ""), float(score or 0.0)
+
+    def run(self, images: list[Image.Image]):
+        texts: list[str | None] = []
+        scores: list[float | None] = []
+        for i in range(0, len(images), self.batch_size):
+            batch = [np.array(im.convert("RGB")) for im in images[i:i + self.batch_size]]
+            try:
+                out = list(self._rec.predict(batch))
+            except Exception as exc:
+                print(f"[{self.name}] batch of {len(batch)} failed: {exc}")
+                texts.extend([None] * len(batch))
+                scores.extend([None] * len(batch))
+                self._tick(len(batch))
+                continue
+            if len(out) != len(batch):
+                # never silently misalign predictions with rows
+                print(f"[{self.name}] returned {len(out)} results for {len(batch)} inputs; "
+                      f"marking the batch failed")
+                texts.extend([None] * len(batch))
+                scores.extend([None] * len(batch))
+                self._tick(len(batch))
+                continue
+            for o in out:
+                t, sc = self._extract(o)
+                texts.append(t)
+                scores.append(sc)
+            self._tick(len(batch))
+        return texts, scores
 
 class SuryaEngine(OCREngine):
     """Surya 1 (surya-ocr 0.14.x), recognition only.
