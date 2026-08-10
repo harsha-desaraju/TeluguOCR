@@ -68,7 +68,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -88,12 +88,27 @@ def session():
     return _local.s
 
 
-def get(params, retries=3, delay=1.0):
-    """GET the MediaWiki API as JSON, retrying a few times on failure."""
+def get(params, retries=6, delay=1.0):
+    """GET the MediaWiki API as JSON, retrying on failure.
+
+    Throttling is handled separately from other errors, for the same reason
+    fetch_image_bytes does it: the API answers 429 under concurrent load, and
+    retrying on a short linear backoff just hammers straight back into the
+    throttle. A 429/503 is waited out with exponential backoff, honouring
+    Retry-After when the server sends one -- otherwise a parallel run loses
+    every page in a batch to a limit that would have cleared in seconds.
+    """
     params = {**params, "format": "json", "formatversion": 2}
+    backoff = 2.0
     for attempt in range(retries):
         try:
             r = session().get(API, params=params, timeout=60)
+            if r.status_code in (429, 503):
+                wait = float(r.headers.get("Retry-After") or backoff)
+                tqdm.write(f"  api throttled ({r.status_code}), waiting {wait:.0f}s")
+                time.sleep(wait)
+                backoff = min(backoff * 2, 60.0)
+                continue
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -213,8 +228,29 @@ def image_url_candidates(info, target_width=1280):
     return [upscaled, best] if upscaled != best else [best]
 
 
+def title_batches(titles, max_count=50, max_chars=3500):
+    """Group titles into API calls bounded by BOTH count and encoded URL length.
+
+    Count alone is not enough. A Telugu title percent-encodes to 300-700 bytes
+    ("పుట:షహీద్-యే-ఆజం అష్ఫాఖుల్లా ఖాన్.pdf/16" is ~380), so 50 of them make a
+    query string several times over the server's URI limit and every call comes
+    back 414. ASCII-titled books never hit it, which is why the production
+    scrape never saw this.
+    """
+    batch, size = [], 0
+    for title in titles:
+        cost = len(quote(str(title))) + 3          # +3 for the "|" separator
+        if batch and (len(batch) >= max_count or size + cost > max_chars):
+            yield batch
+            batch, size = [], 0
+        batch.append(title)
+        size += cost
+    if batch:
+        yield batch
+
+
 def resolve_image_urls(pages, batch_size=50):
-    """Fill in `image_url` for pages that lack it, 50 titles per API call.
+    """Fill in `image_url` for pages that lack it, batched per API call.
 
     Listings cached before image URLs were recorded still work: the pages they hold
     are topped up here instead of forcing a re-pull of the whole 53k-row category.
@@ -224,9 +260,8 @@ def resolve_image_urls(pages, batch_size=50):
         return pages
 
     by_title = {p["title"]: p for p in missing}
-    titles = list(by_title)
-    for i in tqdm(range(0, len(titles), batch_size), desc="image urls", unit="batch"):
-        chunk = titles[i:i + batch_size]
+    batches = list(title_batches(list(by_title), max_count=batch_size))
+    for chunk in tqdm(batches, desc="image urls", unit="batch"):
         data = get({"action": "query", "prop": "imageforpage",
                     "prppifpprop": IMAGE_PROPS, "titles": "|".join(chunk)})
         if data is None:
@@ -394,13 +429,18 @@ def slugify(page):
     return f"{stem}_p{page['page_no']:04d}"
 
 
-def fetch_pair(page, img_dir, txt_dir, delay=0.0):
+def fetch_pair(page, img_dir, txt_dir, delay=0.0, slug_fn=slugify):
     """Download one (image, text) pair. Runs in a worker thread.
 
     Returns a record dict, or None if the page has no text / the image failed.
     Pages already on disk are read back instead of re-downloaded (resume).
+
+    `slug_fn` overrides how the on-disk name is derived. It exists because
+    `slugify` drops non-ASCII, which is fine for this scrape (ASCII book names)
+    but collapses Telugu-titled books to a bare "_pNNNN" — see
+    build_benchmark_set.py, which passes a Unicode-preserving one.
     """
-    slug = slugify(page)
+    slug = slug_fn(page)
     img_path = img_dir / f"{slug}.jpg"
     txt_path = txt_dir / f"{slug}.txt"
 
@@ -426,7 +466,8 @@ def fetch_pair(page, img_dir, txt_dir, delay=0.0):
     }
 
 
-def download_pages(pages, out_dir, num_workers=8, delay=0.0, desc="pages"):
+def download_pages(pages, out_dir, num_workers=8, delay=0.0, desc="pages",
+                   slug_fn=slugify):
     """Download a list of pages into <out_dir>/{images,text}. Returns the records."""
     out_dir = Path(out_dir)
     img_dir, txt_dir = out_dir / "images", out_dir / "text"
@@ -435,7 +476,8 @@ def download_pages(pages, out_dir, num_workers=8, delay=0.0, desc="pages"):
 
     records = []
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        futures = [pool.submit(fetch_pair, p, img_dir, txt_dir, delay) for p in pages]
+        futures = [pool.submit(fetch_pair, p, img_dir, txt_dir, delay, slug_fn)
+                   for p in pages]
         for future in tqdm(as_completed(futures), total=len(futures), desc=desc, unit="pg"):
             record = future.result()
             if record:
