@@ -236,25 +236,13 @@ CTC_LOSS_WEIGHT = 0.3
 # ============================================================================
 # ADDED (stage-1): CER evaluation utilities + callback.
 # ============================================================================
-def _edit_distance(a, b):
-    # Levenshtein, dependency-free
-    m, n = len(a), len(b)
-    dp = list(range(n + 1))
-    for i in range(1, m + 1):
-        prev, dp[0] = dp[0], i
-        for j in range(1, n + 1):
-            cur = dp[j]
-            dp[j] = min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] != b[j - 1]))
-            prev = cur
-    return dp[n]
+from src.telugu_ocr.metrics.errors import _edit_distance, compute_cer
+from src.telugu_ocr.training.callbacks import GradNormAlert
+from src.telugu_ocr.training.checkpoint import find_last_checkpoint
+from src.telugu_ocr.training.eval_slices import ListEvalDataset, build_eval_slices
+from src.telugu_ocr.training.optim import build_optimizer, build_scheduler
 
 
-def compute_cer(preds, refs):
-    tot_e = tot_c = 0
-    for p, r in zip(preds, refs):
-        tot_e += _edit_distance(p, r)
-        tot_c += max(len(r), 1)
-    return tot_e / max(tot_c, 1)
 
 
 # B=1 greedy generation with no KV cache is SLOW (~seconds/sequence). This runs on
@@ -523,52 +511,11 @@ def _param_tier(name: str) -> str:
     return "lm"                                           # rest of the decoder / LM
 
 
-def build_optimizer(model, lrs, min_lrs, weight_decay, betas):
-    """Three LR tiers (encoder / cross-attention / LM), each with its own peak LR.
-
-    `lrs` and `min_lrs` are dicts keyed by LR_TIERS giving each tier's peak (max) and
-    cosine floor (min) LR. The per-tier floor is attached to each param group as
-    'min_lr' so build_scheduler can decay every group from its own peak to its own min.
-
-    Biases / norm weights / positional embeddings get NO weight decay (matches the
-    prior convention); other 2-D weights get `weight_decay`."""
-    tiers = {t: {"decay": [], "nodecay": []} for t in LR_TIERS}
-    for name, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        t = _param_tier(name)
-        if "pos_embed" in name or p.ndim < 2 or "norm" in name.lower():
-            tiers[t]["nodecay"].append(p)                 # embeddings/bias/norm -> no WD
-        else:
-            tiers[t]["decay"].append(p)
-
-    groups = []
-    for t in LR_TIERS:
-        if tiers[t]["decay"]:
-            groups.append({"params": tiers[t]["decay"], "lr": lrs[t],
-                           "min_lr": min_lrs[t], "weight_decay": weight_decay})
-        if tiers[t]["nodecay"]:
-            groups.append({"params": tiers[t]["nodecay"], "lr": lrs[t],
-                           "min_lr": min_lrs[t], "weight_decay": 0.0})
-    return torch.optim.AdamW(groups, betas=betas)
 
 
 # Scheduler: per-group linear warmup -> cosine decay from the group's own peak (group
 # 'lr') to the group's own floor (group 'min_lr'). Each of the three LR tiers therefore
 # rides its own cosine curve between its configured max and min.
-def build_scheduler(optimizer, warmup_steps, total_steps):
-    from torch.optim.lr_scheduler import LambdaLR
-
-    def make(peak, floor):
-        def f(step):
-            if step < warmup_steps:
-                return step / max(1, warmup_steps)
-            prog = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
-            cos = 0.5 * (1.0 + math.cos(math.pi * prog))
-            return (floor + (peak - floor) * cos) / peak  # peak -> floor, this group's own
-        return f
-
-    return LambdaLR(optimizer, [make(g["lr"], g["min_lr"]) for g in optimizer.param_groups])
 
 
 class EncoderDecoderTrainer(Trainer):
@@ -609,83 +556,16 @@ class EncoderDecoderTrainer(Trainer):
         return super().log(logs, *args, **kwargs)
 
 
-class GradNormAlert(TrainerCallback):
-    """PORTED from train_ctc_encoder.py: alert on grad-norm spikes > threshold."""
-
-    def __init__(self, threshold=10.0):
-        self.threshold = threshold
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        gn = (logs or {}).get("grad_norm")
-        if gn is not None and gn > self.threshold:
-            print(f"[ALERT] grad_norm={gn:.2f} > {self.threshold} at step {state.global_step}")
 
 
 # ============================================================================
 # Eval slices — PORTED from train_ctc_encoder.py, adapted to the encoder-decoder
 # data format (each item is {pixel_values, input_ids} for OCRCollator).
 # ============================================================================
-class ListEvalDataset(torch.utils.data.Dataset):
-    """In-memory map-style eval dataset over raw row dicts. Applies the (no-aug)
-    eval preprocessing per item and produces the encoder-decoder input format."""
-
-    def __init__(self, rows, preprocessor, tokenizer, image_col, text_col):
-        self.rows = rows
-        self.prep = preprocessor       # clean ImagePreprocessor (augment_fn=None)
-        self.tok = tokenizer
-        self.image_col = image_col
-        self.text_col = text_col
-
-    def __len__(self):
-        return len(self.rows)
-
-    def __getitem__(self, i):
-        r = self.rows[i]
-        return {
-            "pixel_values": self.prep(r[self.image_col]),          # (1, H, W_i)
-            "input_ids": self.tok.encode(r[self.text_col]),        # BOS ... EOS
-        }
 
 
-def build_eval_slices(rows, source_col, slice_cap, seed):
-    """Partition materialized eval rows by TEXT SOURCE (natural / random) when the
-    source column is present; otherwise a single 'all' slice. Returns a dict
-    ``{slice_name: [raw_row, ...]}`` (raw rows, for the generate-based CER).
-
-    (Width-based short/long slicing was dropped: two source slices keep the total
-    generation count small enough for the rank-0-only CER eval.)"""
-    has_src = bool(rows) and source_col in rows[0]
-
-    def subset(predicate):
-        idx = [i for i in range(len(rows)) if predicate(i)]
-        if not idx:
-            return None
-        if slice_cap and len(idx) > slice_cap:
-            g = torch.Generator().manual_seed(seed)
-            idx = [idx[j] for j in torch.randperm(len(idx), generator=g)[:slice_cap].tolist()]
-        return [rows[i] for i in idx]
-
-    slices = {}
-    if has_src:
-        for s in ("natural", "random"):
-            sub = subset(lambda i, ss=s: rows[i].get(source_col) == ss)
-            if sub is not None:
-                slices[s] = sub
-    else:
-        sub = subset(lambda i: True)
-        if sub is not None:
-            slices["all"] = sub
-    print(f"[eval] slices: { {k: len(v) for k, v in slices.items()} }")
-    return slices
 
 
-def find_last_checkpoint(output_dir, prev_run_dir):
-    for d in (output_dir, prev_run_dir):
-        if d and os.path.isdir(d):
-            ckpt = get_last_checkpoint(d)
-            if ckpt is not None:
-                return ckpt
-    return None
 
 
 if __name__ == '__main__':
@@ -924,7 +804,9 @@ if __name__ == '__main__':
                                 ctc_strip_ids=(tokenizer.bos_token_id, tokenizer.eos_token_id))
 
     # ---- Optimizer (fresh, three LR tiers); scheduler built by EncoderDecoderTrainer ----
-    optimizer = build_optimizer(model, LR, MIN_LR, WEIGHT_DECAY, BETAS)
+    # Three LR tiers (encoder / cross-attention / LM), each with its own peak and floor.
+    optimizer = build_optimizer(model, lrs=LR, min_lrs=MIN_LR, weight_decay=WEIGHT_DECAY,
+                                betas=BETAS, tier_fn=_param_tier, tiers=LR_TIERS)
 
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,

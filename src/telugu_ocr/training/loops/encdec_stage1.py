@@ -220,25 +220,13 @@ from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 # ============================================================================
 # ADDED (stage-1): CER evaluation utilities + callback.
 # ============================================================================
-def _edit_distance(a, b):
-    # Levenshtein, dependency-free
-    m, n = len(a), len(b)
-    dp = list(range(n + 1))
-    for i in range(1, m + 1):
-        prev, dp[0] = dp[0], i
-        for j in range(1, n + 1):
-            cur = dp[j]
-            dp[j] = min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] != b[j - 1]))
-            prev = cur
-    return dp[n]
+from src.telugu_ocr.metrics.errors import _edit_distance, compute_cer
+from src.telugu_ocr.training.callbacks import GradNormAlert
+from src.telugu_ocr.training.checkpoint import find_last_checkpoint
+from src.telugu_ocr.training.eval_slices import ListEvalDataset, build_eval_slices
+from src.telugu_ocr.training.optim import build_optimizer, build_scheduler
 
 
-def compute_cer(preds, refs):
-    tot_e = tot_c = 0
-    for p, r in zip(preds, refs):
-        tot_e += _edit_distance(p, r)
-        tot_c += max(len(r), 1)
-    return tot_e / max(tot_c, 1)
 
 
 # B=1 greedy generation with no KV cache is SLOW (~seconds/sequence). This runs on
@@ -395,44 +383,9 @@ class OCRCollator:
 # ============================================================================
 # Optimizer / scheduler — PORTED from train_ctc_encoder.py.
 # ============================================================================
-def build_optimizer(model, lr, weight_decay, betas):
-    """Single LR tier. Biases / norm weights / positional embeddings get no weight
-    decay (matches the prior Trainer default); other weights get `weight_decay`.
-
-    In stage-1 only the newly-added adapter params are trainable (cross-attention
-    q/k/v/out + the bridge Linear -> decay; layer_norm1_5 + the cross_attn_gate ->
-    no decay); the frozen encoder/decoder params are skipped."""
-    decay, nodecay = [], []
-    for name, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        if name == "pos_embed" or p.ndim < 2 or "norm" in name.lower():
-            nodecay.append(p)                             # embeddings/bias/norm -> no WD
-        else:
-            decay.append(p)
-    groups = [
-        {"params": decay, "lr": lr, "weight_decay": weight_decay},
-        {"params": nodecay, "lr": lr, "weight_decay": 0.0},
-    ]
-    return torch.optim.AdamW(groups, betas=betas)
 
 
 # Scheduler: warmup -> cosine decay to an ABSOLUTE floor `min_lr`. Single LR tier.
-def build_scheduler(optimizer, warmup_steps, total_steps, min_lr):
-    """Per-group linear warmup -> cosine decay to an ABSOLUTE floor `min_lr`.
-    Each group decays from its own peak (group 'lr') down to `min_lr`."""
-    from torch.optim.lr_scheduler import LambdaLR
-
-    def make(peak):
-        def f(step):
-            if step < warmup_steps:
-                return step / max(1, warmup_steps)
-            prog = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
-            cos = 0.5 * (1.0 + math.cos(math.pi * prog))
-            return (min_lr + (peak - min_lr) * cos) / peak    # absolute floor min_lr
-        return f
-
-    return LambdaLR(optimizer, [make(g["lr"]) for g in optimizer.param_groups])
 
 
 class EncoderDecoderTrainer(Trainer):
@@ -487,83 +440,16 @@ class EncoderDecoderTrainer(Trainer):
         return super().compute_loss(model, inputs, *args, **kwargs)
 
 
-class GradNormAlert(TrainerCallback):
-    """PORTED from train_ctc_encoder.py: alert on grad-norm spikes > threshold."""
-
-    def __init__(self, threshold=10.0):
-        self.threshold = threshold
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        gn = (logs or {}).get("grad_norm")
-        if gn is not None and gn > self.threshold:
-            print(f"[ALERT] grad_norm={gn:.2f} > {self.threshold} at step {state.global_step}")
 
 
 # ============================================================================
 # Eval slices — PORTED from train_ctc_encoder.py, adapted to the encoder-decoder
 # data format (each item is {pixel_values, input_ids} for OCRCollator).
 # ============================================================================
-class ListEvalDataset(torch.utils.data.Dataset):
-    """In-memory map-style eval dataset over raw row dicts. Applies the (no-aug)
-    eval preprocessing per item and produces the encoder-decoder input format."""
-
-    def __init__(self, rows, preprocessor, tokenizer, image_col, text_col):
-        self.rows = rows
-        self.prep = preprocessor       # clean ImagePreprocessor (augment_fn=None)
-        self.tok = tokenizer
-        self.image_col = image_col
-        self.text_col = text_col
-
-    def __len__(self):
-        return len(self.rows)
-
-    def __getitem__(self, i):
-        r = self.rows[i]
-        return {
-            "pixel_values": self.prep(r[self.image_col]),          # (1, H, W_i)
-            "input_ids": self.tok.encode(r[self.text_col]),        # BOS ... EOS
-        }
 
 
-def build_eval_slices(rows, image_col, text_col, source_col, slice_cap, seed):
-    """Partition materialized eval rows by TEXT SOURCE (natural / random) when the
-    source column is present; otherwise a single 'all' slice. Returns a dict
-    ``{slice_name: [raw_row, ...]}`` (raw rows, for the generate-based CER).
-
-    (Width-based short/long slicing was dropped: two source slices keep the total
-    generation count small enough for the rank-0-only CER eval.)"""
-    has_src = bool(rows) and source_col in rows[0]
-
-    def subset(predicate):
-        idx = [i for i in range(len(rows)) if predicate(i)]
-        if not idx:
-            return None
-        if slice_cap and len(idx) > slice_cap:
-            g = torch.Generator().manual_seed(seed)
-            idx = [idx[j] for j in torch.randperm(len(idx), generator=g)[:slice_cap].tolist()]
-        return [rows[i] for i in idx]
-
-    slices = {}
-    if has_src:
-        for s in ("natural", "random"):
-            sub = subset(lambda i, ss=s: rows[i].get(source_col) == ss)
-            if sub is not None:
-                slices[s] = sub
-    else:
-        sub = subset(lambda i: True)
-        if sub is not None:
-            slices["all"] = sub
-    print(f"[eval] slices: { {k: len(v) for k, v in slices.items()} }")
-    return slices
 
 
-def find_last_checkpoint(output_dir, prev_run_dir):
-    for d in (output_dir, prev_run_dir):
-        if d and os.path.isdir(d):
-            ckpt = get_last_checkpoint(d)
-            if ckpt is not None:
-                return ckpt
-    return None
 
 
 if __name__ == '__main__':
@@ -807,7 +693,7 @@ if __name__ == '__main__':
     val_ds = load_dataset(DATASET_NAME1, EVAL_SPLIT)[EVAL_SPLIT]
     val_rows = list(val_ds)
     print(f"[data] validation -> {len(val_rows)} rows")
-    eval_slices = build_eval_slices(val_rows, IMAGE_COLUMN, TEXT_COLUMN, SOURCE_COLUMN,
+    eval_slices = build_eval_slices(val_rows, SOURCE_COLUMN,
                                     EVAL_SLICE_CAP, SEED)
 
     # A single small transformed eval set drives Trainer's eval_loss and fires
@@ -818,7 +704,8 @@ if __name__ == '__main__':
     data_collator = OCRCollator(pad_token_id=tokenizer.pad_token_id, downsample=DOWNSAMPLE)
 
     # ---- Optimizer (fresh, single LR tier); scheduler built by EncoderDecoderTrainer ----
-    optimizer = build_optimizer(model, LR, WEIGHT_DECAY, BETAS)
+    # Single LR tier: only the new adapter params are trainable in stage 1.
+    optimizer = build_optimizer(model, lrs=LR, weight_decay=WEIGHT_DECAY, betas=BETAS)
 
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,

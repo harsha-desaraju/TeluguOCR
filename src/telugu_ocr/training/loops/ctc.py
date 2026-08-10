@@ -339,18 +339,9 @@ class CTCCollator:
 _GRAPHEME = regex.compile(r"\X")
 
 
-def _edit_distance(a, b):
-    if len(a) < len(b):
-        a, b = b, a
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        prev = cur
-    return prev[-1]
+from src.telugu_ocr.metrics.errors import _edit_distance
+from src.telugu_ocr.training.callbacks import GradNormAlert
+from src.telugu_ocr.training.checkpoint import find_last_checkpoint
 
 
 def make_compute_metrics(tokenizer, blank_id):
@@ -440,16 +431,6 @@ class CTCTrainer(Trainer):
         return self.lr_scheduler
 
 
-class GradNormAlert(TrainerCallback):
-    """CHANGED(2048): alert on grad-norm spikes > threshold (default 10)."""
-
-    def __init__(self, threshold=10.0):
-        self.threshold = threshold
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        gn = (logs or {}).get("grad_norm")
-        if gn is not None and gn > self.threshold:
-            print(f"[ALERT] grad_norm={gn:.2f} > {self.threshold} at step {state.global_step}")
 
 
 # ============================================================================
@@ -515,13 +496,6 @@ def build_eval_slices(rows, image_col, text_col, source_col, width_col, preproce
     return slices
 
 
-def find_last_checkpoint(output_dir, prev_run_dir):
-    for d in (output_dir, prev_run_dir):
-        if d and os.path.isdir(d):
-            ckpt = get_last_checkpoint(d)
-            if ckpt is not None:
-                return ckpt
-    return None
 
 
 # ============================================================================
