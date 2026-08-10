@@ -92,6 +92,14 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
         self.add_eos_token = add_eos_token
         self.UNK = unk_token
 
+        # setdefault, NOT keyword arguments: `save_pretrained` writes padding_side and
+        # model_max_length into tokenizer_config.json, and `from_pretrained` then feeds
+        # them back through **kwargs. Passing them explicitly as well raised
+        # "got multiple values for keyword argument 'model_max_length'", so the tokenizer
+        # could be constructed directly but never reloaded from a saved directory --
+        # which is what AutoTokenizer does. Defaults are unchanged for direct callers.
+        kwargs.setdefault("padding_side", "right")
+        kwargs.setdefault("model_max_length", 4096)
         super().__init__(
             pad_token=pad_token,
             unk_token=unk_token,
@@ -100,8 +108,6 @@ class TeluguGraphemeTokenizer(PreTrainedTokenizer):
             mask_token=mask_token,
             add_bos_token=add_bos_token,
             add_eos_token=add_eos_token,
-            padding_side="right",
-            model_max_length=4096,
             **kwargs,
         )
 
