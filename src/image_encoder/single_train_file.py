@@ -1,13 +1,12 @@
 import os
 import torch
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset
 from transformers import Trainer, TrainingArguments
 from PIL import Image
 from torchvision import transforms
 import torch.nn as nn
 from dataclasses import dataclass
 from transformers.trainer_utils import get_last_checkpoint
-import numpy as np
 
 
 def random_masking(x, mask_ratio):
@@ -98,43 +97,14 @@ class ImagePreprocessor:
         self.image_height = image_height
         self.max_image_width = max_image_width
         self.patch_size = patch_size
-        self.to_tensor = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
-        ])
+        self.to_tensor = transforms.PILToTensor()
 
     def _transform(self, img: Image.Image) -> torch.Tensor:
         # Convert to GrayScale
         img = img.convert('L')
-
-        # Calculate the resize target for the image while preserving the aspect ratio
-        img_w, img_h = img.size
-        scale_factor = self.image_height/img_h
-        if scale_factor * img_w > self.max_image_width:
-            scale_factor = self.max_image_width/img_w
-            target_size = (int(scale_factor * img_h), self.max_image_width)
-            diff = self.image_height - target_size[0]
-            pad_t, pad_b = diff//2, diff - diff//2
-            pad_l, pad_r = 0, 0
-            fill_value = np.array(img)[:2, :].mean()
-        else:
-            target_size = (self.image_height, int(scale_factor*img_w))
-            # Find the nearest multiple of patch size for padding
-            diff = (-target_size[1]) % self.patch_size
-            pad_l, pad_r = 0, diff
-            pad_t, pad_b = 0, 0
-            fill_value = np.array(img)[:, -2:].mean()
-
-        img = transforms.Resize(target_size)(img)
-        img = transforms.Pad((pad_l, pad_t, pad_r, pad_b), fill=fill_value)(img)
-
         return self.to_tensor(img)
 
     def __call__(self, sample: dict) -> dict:
-        # return {
-        #     "line_image": self._transform(sample['line_image']),
-        #     "image_width": sample["image_width"]
-        # }
         return {
             "line_image": [self._transform(sample['line_image'][0])],
             "image_width": sample["image_width"]
@@ -290,6 +260,8 @@ class MaskedAutoEncoder(nn.Module):
         self.decoder_model = ViTDecoder(decoder_config, encoder_config.embed_dim)
 
     def forward(self, images: torch.Tensor, padding_masks: torch.Tensor):
+        images = (images.float() / 255.0 - 0.5) / 0.5
+
         latent, mask, restore_ids = self.encoder_model(images, padding_masks,  self.mask_ratio)
 
         pred = self.decoder_model(latent, restore_ids, padding_masks)
@@ -311,44 +283,29 @@ class MaskedAutoEncoder(nn.Module):
 
 
 
-
 def collator_function(batch):
-    # Also think about the device ??
+    imgs = [s['line_image'] for s in batch]          # each (C, H, W); C and H fixed
+    B = len(imgs)
+    Cc, H = imgs[0].shape[0], imgs[0].shape[1]
+    widths = torch.tensor([im.shape[2] for im in imgs])
+    W_max = int(widths.max())
 
-    img_height = 0
-    max_batch_width = 0
-    for sample in batch:
-        image = sample['line_image']
-        if image.shape[-1] > max_batch_width:
-            max_batch_width = image.shape[2]
-            img_height = image.shape[1]
+    # One preallocation + one memcpy per image.
+    # No per-image torch.cat and no final list-of-tensors cat (that was the ~2x data movement).
+    images = imgs[0].new_zeros((B, Cc, H, W_max))
+    for i, im in enumerate(imgs):
+        images[i, :, :, :im.shape[2]] = im
 
-    num_channels = batch[0]['line_image'].shape[0]
+    # Fully-vectorized patch padding mask. Row-major over (h_p, w_p) so it matches
+    # the encoder's embeds.flatten(2) order (index = h*w_p + w).
+    h_p  = H // PATCH_SIZE
+    w_mp = W_max // PATCH_SIZE
+    wp   = widths // PATCH_SIZE                        # real patch-width per image
+    col  = torch.arange(w_mp)
+    col_pad = col.unsqueeze(0) >= wp.unsqueeze(1)      # (B, w_mp)  True = padding
+    padding_masks = col_pad.unsqueeze(1).expand(B, h_p, w_mp).reshape(B, h_p * w_mp)
 
-    zeros_img = batch[0]['line_image'].new_zeros((num_channels, img_height, max_batch_width))
-
-    padded_images, padding_masks = [], []
-    for sample in batch:
-        image = sample['line_image']
-        img_h, img_w = image.shape[1], image.shape[2]
-        h_p, w_p = img_h // PATCH_SIZE, img_w // PATCH_SIZE
-
-        pad_len = max_batch_width - img_w
-        padded_img = torch.cat([image, zeros_img[:, :, :pad_len]], dim=2)
-
-        pad_mask = torch.ones((h_p, w_p + pad_len // PATCH_SIZE), dtype=torch.bool)
-        pad_mask[:, :w_p] = False
-
-        padded_images.append(padded_img.unsqueeze(0))
-        padding_masks.append(pad_mask.flatten().unsqueeze(0))
-
-    padded_images = torch.cat(padded_images, dim=0)
-    padding_masks = torch.cat(padding_masks, dim=0)
-
-    return {
-        "images": padded_images,
-        "padding_masks": padding_masks
-    }
+    return {"images": images, "padding_masks": padding_masks}
 
 
 def process_sample(sample):
@@ -367,10 +324,32 @@ def find_last_checkpoint():
     return None
 
 
+# =============================================================================
+# Drop-in replacement for your `if __name__ == '__main__':` block.
+# Keep all your model/dataset/collator definitions above unchanged.
+#
+# Three things done here:
+#   1) Balanced settings, 150 epochs (from scratch).
+#   2) Robust checkpointing + resume (survives Kaggle's 12h session wall).
+#   3) eval_loss fix: label_names=[] + trainer.can_return_loss=True
+#      (+ prediction_loss_only=True so eval doesn't OOM accumulating logits).
+# =============================================================================
+
 if __name__ == '__main__':
-    BATCH_SIZE = 1024
-    EPOCHS = 70
-    TEST_SIZE = 0.05
+    # ---- Balanced recipe (from scratch) ----------------------------------
+    PER_DEVICE_BATCH = 256  # start safe on 16GB T4; bump to 64 if headroom
+    GRAD_ACCUM = 4  # eff batch = 48 * 2 GPUs * 8 = 768
+    EPOCHS = 5
+    # LEARNING_RATE = 1.2e-3  # 1.5e-4 * eff_batch/256  (MAE linear scaling)
+    LEARNING_RATE = 1.5e-4 * GRAD_ACCUM * 2 * PER_DEVICE_BATCH / 256
+    print(f"Using a batch size of  : {PER_DEVICE_BATCH}")
+    print(f"Using learning rate of : {LEARNING_RATE:e}")
+    TEST_SIZE = 0.005
+
+    # Full eval set is ~133k images (5% of 2.67M) — far more than you need just
+    # to watch a loss curve, and it makes every eval slow. Monitor on a fixed
+    # random subset. Set to `None` to evaluate on the full held-out split.
+    EVAL_SUBSET_SIZE = 6000
 
     IMAGE_HEIGHT = 64
     MAX_IMAGE_WIDTH = 1024
@@ -378,37 +357,31 @@ if __name__ == '__main__':
     MASK_RATIO = 0.75
 
     # New checkpoints are written here (writable on Kaggle).
-    OUTPUT_DIR = "/kaggle/working/telugu-vitmae"
-    # OUTPUT_DIR = "/Users/xai/Personal/Projects/TeluguOCR/src/image_encoder/telugu-vitmae"
+    OUTPUT_DIR = "/Users/xai/Personal/Projects/TeluguOCR/models/telugu-vitmae"
 
-    # A previous session's output, added as a Kaggle Dataset / notebook-output input.
-    # Read-only. Leave as None for the very first run.
+    # A previous session's committed output, re-added as a notebook-output /
+    # dataset input. Read-only. Leave None for the very first run, then set it
+    # to the prior session's output path for every continuation run.
     PREV_RUN_DIR = None  # e.g. "/kaggle/input/telugu-vitmae-prev/telugu-vitmae"
 
-    # Load and Prepare the datasets
-
-    configs = ["set_1", "set_2", "set_3", "set_4", "set_5"]
-    ds = []
-    for config in configs:
-        tds = load_dataset("harsha-desaraju/telugu-book-line-images", config, split="train",
-                           columns=['line_image', 'image_width'])
-        ds.append(tds)
-    ds = concatenate_datasets(ds)
+    ds = load_dataset(
+        "harsha-desaraju/sample-line-images", columns=['line_image', "image_width"], split='train',
+    )
 
     split_dataset = ds.train_test_split(test_size=TEST_SIZE, seed=42)
     train_ds = split_dataset['train']
     test_ds = split_dataset['test']
 
-    preprocessor = ImagePreprocessor(IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PATCH_SIZE)
+    # Subsample eval for fast, frequent monitoring (before transform).
+    if EVAL_SUBSET_SIZE is not None and EVAL_SUBSET_SIZE < len(test_ds):
+        test_ds = test_ds.shuffle(seed=42).select(range(EVAL_SUBSET_SIZE))
 
-    train_ds = train_ds.with_format("torch", columns=['line_image'], output_all_columns=True)
-    test_ds = test_ds.with_format("torch", columns=['line_image'], output_all_columns=True)
+    preprocessor = ImagePreprocessor(IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PATCH_SIZE)
 
     train_ds = train_ds.with_transform(preprocessor)
     test_ds = test_ds.with_transform(preprocessor)
 
-    # Initialize the models
-
+    # ---- Model (FROM SCRATCH — no load_state_dict) -----------------------
     encoder_config = ViTConfig(
         embed_dim=512, num_heads=8, dropout=0.0, hidden_layer_size=2048,
         num_blocks=12, patch_size=PATCH_SIZE, image_height=IMAGE_HEIGHT,
@@ -422,77 +395,93 @@ if __name__ == '__main__':
     mae_model = MaskedAutoEncoder(
         encoder_config=encoder_config,
         decoder_config=decoder_config,
-        mask_ratio=MASK_RATIO
+        mask_ratio=MASK_RATIO,
     )
 
-    # Load the pre-trained model
-    mae_model.load_state_dict(torch.load("/kaggle/input/models/harshadesaraju1999/telugu-text-image-encoder/pytorch/default/1/final_model.pt"))
+    def _count(m):
+        return sum(p.numel() for p in m.parameters())
 
-    num_params = 0
-    for layer in mae_model.parameters():
-        num_params += layer.numel()
 
-    print(f"No. of parameters in the full MAE model: {num_params}")
+    print(f"Full MAE params:  {_count(mae_model):,}")
+    print(f"Encoder params:   {_count(mae_model.encoder_model):,}")
+    print(f"Decoder params:   {_count(mae_model.decoder_model):,}")
 
-    num_params = 0
-    for layer in mae_model.encoder_model.parameters():
-        num_params += layer.numel()
 
-    print(f"No. of parameters in the encoder model: {num_params}")
+    # ---- Resume logic ----------------------------------------------------
+    def find_last_checkpoint():
+        # Prefer the current working dir, then a prior run's read-only input.
+        for d in (OUTPUT_DIR, PREV_RUN_DIR):
+            if d and os.path.isdir(d):
+                ckpt = get_last_checkpoint(d)
+                if ckpt is not None:
+                    return ckpt
+        return None
 
-    num_params = 0
-    for layer in mae_model.decoder_model.parameters():
-        num_params += layer.numel()
 
-    print(f"No. of parameters in the decoder model: {num_params}")
-
-    # Define the trainer and train the model
     last_checkpoint = find_last_checkpoint()
-    print(f"Resuming from: {last_checkpoint}" if last_checkpoint else "No checkpoint — starting fresh.")
+    print(f"Resuming from: {last_checkpoint}" if last_checkpoint
+          else "No checkpoint — starting fresh.")
 
+    # If the checkpoint lives in the read-only PREV_RUN_DIR, copy it into the
+    # writable OUTPUT_DIR first, so the Trainer can keep writing new checkpoints
+    # and correctly continues its global_step / optimizer / scheduler state.
+    if last_checkpoint is not None and last_checkpoint.startswith(str(PREV_RUN_DIR or "")):
+        import shutil
+
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        dst = os.path.join(OUTPUT_DIR, os.path.basename(last_checkpoint))
+        if not os.path.isdir(dst):
+            print(f"Copying checkpoint into writable dir: {dst}")
+            shutil.copytree(last_checkpoint, dst)
+        last_checkpoint = dst
+
+    # ---- TrainingArguments ----------------------------------------------
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-
-        # Number of epochs
         num_train_epochs=EPOCHS,
 
-        # Batch size and Accumulation
-        per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=1,  # raise to grow effective batch on T4
+        per_device_train_batch_size=PER_DEVICE_BATCH,
+        per_device_eval_batch_size=PER_DEVICE_BATCH,
+        gradient_accumulation_steps=GRAD_ACCUM,
 
-        # Optimizer & Scheduler
         optim="adamw_torch_fused",
-        learning_rate=1e-4,
+        learning_rate=LEARNING_RATE,
         weight_decay=0.05,
-        warmup_ratio=0.05,
+        warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         adam_beta2=0.95,
+        max_grad_norm=1.0,  # keep — fp16 stability at high LR
 
-        # Save and Eval
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=2,
+        # --- Checkpointing: frequent, to survive the 12h Kaggle wall ---
+        save_strategy="steps",
+        save_steps=250,
+        save_total_limit=3,
+        load_best_model_at_end=False,  # pure continuation; don't reload "best"
+
+        # --- Eval / the eval_loss fix ---
+        eval_strategy="steps",
+        eval_steps=500,
+        prediction_loss_only=True,  # don't accumulate (B,N,64) logits -> no OOM
+        label_names=[],  # <-- tells Trainer the model returns its own loss
 
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
+        # group_by_length=True,
+        # length_column_name="image_width",
 
-        # Precision and performance
-        fp16=torch.cuda.is_available(),  # T4 = fp16 (no bf16 on Turing)
-        dataloader_num_workers=4,
+        # Precision / perf (T4 = Turing -> fp16, no bf16)
+        fp16=torch.cuda.is_available(),
+        dataloader_num_workers=2,  # Kaggle has few CPU cores; 2 per DDP proc
         dataloader_pin_memory=True,
         dataloader_prefetch_factor=4,
         dataloader_persistent_workers=True,
 
-        # Logging and reporting
-        logging_strategy="epoch",
+        logging_strategy="steps",
+        logging_steps=50,
         logging_first_step=True,
-        report_to="wandb",
-        run_name="vit-training-2"
+        # report_to="wandb",
+        # run_name="vit-mae-scratch-150ep",
     )
-
-
-    # # Change to random sampling for better training
 
     trainer = Trainer(
         model=mae_model,
@@ -501,8 +490,12 @@ if __name__ == '__main__':
         eval_dataset=test_ds,
         data_collator=collator_function,
     )
+    # Second half of the eval_loss fix: the model computes loss without a
+    # `labels` input, so tell the Trainer it's allowed to return that loss.
+    trainer.can_return_loss = True
 
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
-    # Save the model in pytorch
-    torch.save(mae_model.state_dict(), f"{OUTPUT_DIR}/final_model.pt")
+    # Final weights (only reached if the full run completes in one session).
+    trainer.save_model(OUTPUT_DIR)  # HF-style, resumable
+    torch.save(mae_model.state_dict(), f"{OUTPUT_DIR}/final_model.pt")  # your raw state_dict
