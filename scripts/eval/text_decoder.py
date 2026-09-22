@@ -1,11 +1,10 @@
 
 
 import torch
-from safetensors.torch import  load_file
 from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 from src.telugu_ocr.models.text_decoder import GPTConfig, GPTModel
 from typing import Optional
-import torch.nn.functional as F
+from pathlib import Path
 
 
 
@@ -88,8 +87,7 @@ if __name__ == '__main__':
     )
     model = GPTModel(model_config, pad_index=tokenizer.pad_token_type_id)
 
-    state_dict = torch.load("models/text_decoder/telugu-grapheme-gpt/final_model.pt", map_location=torch.device('cpu'))
-    # state_dict = load_file("/Users/xai/Personal/Projects/TeluguOCR/models/text_decoder/results/telugu-grapheme-gpt/checkpoint-49479/model.safetensors")
+    state_dict = torch.load(str(Path("../../models/text_decoder/telugu-grapheme-gpt/final_model.pt")), map_location=torch.device('cpu'))
     model.load_state_dict(state_dict)
     print(model)
 
