@@ -486,8 +486,8 @@ class TeluguOCREngine(OCREngine):
                logP_ctc from the CTC forward algorithm over the SAME encoder frames.
 
     One encoder forward feeds whichever decoders are needed, exactly as in
-    scripts/eval/encoder_decoder.py -- whose `preprocess_image`, `ctc_greedy_ids`,
-    `beam_search` and `ctc_hyp_logprobs` are imported rather than copied, so this
+    scripts/eval/encoder_decoder.py -- whose `preprocess_image`, and the decoders in
+    src/telugu_ocr/decoding.py that both use, are imported rather than copied, so this
     benchmark reports the same numbers that script does.
 
     Images wider than the encoder's max width (2048px once scaled to height 64) cannot
@@ -558,9 +558,8 @@ class TeluguOCREngine(OCREngine):
     def run(self, images: list[Image.Image]) -> list[str]:
         import torch
 
-        from scripts.eval.encoder_decoder import (
-            beam_search, ctc_greedy_ids, ctc_hyp_logprobs, preprocess_image,
-        )
+        from scripts.eval.encoder_decoder import preprocess_image
+        from src.telugu_ocr.decoding import beam_search, ctc_greedy_ids, ctc_hyp_logprobs
 
         out: list[str] = []
         for i, img in enumerate(images):

@@ -10,6 +10,7 @@ from src.telugu_ocr.models.image_encoder import CTCEncoderConfig, ImageEncoderCT
 from src.telugu_ocr.models.text_decoder import GPTModel, GPTConfig, MultiHeadAttention, SwiGLU, calculate_positional_encodings
 from transformers.modeling_outputs import CausalLMOutput
 from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
+from src.telugu_ocr.decoding import greedy_decode
 
 
 
@@ -200,17 +201,17 @@ class EncoderDecoder(nn.Module):
     @torch.no_grad()
     def generate(self, pixel_values, bos_id, eos_id, max_new_tokens=256, no_repeat_cycle=True,
                  enc_out=None, cross_key_mask=None):
-        """Single-sample (B=1) greedy decode.
+        """Single-sample (B=1) greedy decode, returning ids WITH the leading BOS.
 
         ``enc_out`` (the BRIDGED encoder output, i.e. already through enc_to_dec) and its
         ``cross_key_mask`` may be passed in to REUSE a precomputed encoder forward — when
         given, the encoder is not re-run here (``pixel_values`` is then used only for
         batch size / device).
 
-        KV-CACHED: each step feeds only the newest token; self-attention K/V are extended
-        incrementally and the cross-attention K/V projections of the encoder output are
-        computed once on the first step and reused. Per-step cost is O(1) forwards instead
-        of re-running the whole growing sequence (and its unused LM loss) every token."""
+        The decode itself lives in src/telugu_ocr/decoding.py so that batched callers and
+        this one share an implementation; this wrapper keeps the B=1, BOS-prefixed shape
+        its callers expect.
+        """
         self.eval()
         # All frames are valid for a single un-padded image, so input_lengths=None
         # (encode() then treats every frame as real and skips the cross-attn mask).
@@ -218,24 +219,9 @@ class EncoderDecoder(nn.Module):
             enc_out, key_padding_mask = self.encoder_model.encode(pixel_values, None)
             enc_out = self.enc_to_dec(enc_out)
             cross_key_mask = None if key_padding_mask is None else (~key_padding_mask).unsqueeze(1).unsqueeze(2)
-        ids = torch.full((pixel_values.shape[0], 1), bos_id, dtype=torch.long, device=pixel_values.device)
-        ctx = self.decoder_model.positional_encodings.shape[0]
-        past_kvs = None
-        step_input = ids                      # first step: the BOS token
-        for _ in range(min(max_new_tokens, ctx - 1)):
-            out, past_kvs = self.decoder_model(step_input, enc_out, text_padding_mask=None,
-                                               img_text_padding_mask=cross_key_mask, labels=None,
-                                               past_kvs=past_kvs, use_cache=True)
-            nxt = out.logits[:, -1, :].argmax(-1, keepdim=True)
-            ids = torch.cat([ids, nxt], dim=1)
-            step_input = nxt                  # only the new token is fed next step
-            if nxt.item() == eos_id:
-                break
-            if no_repeat_cycle and ids.shape[1] > 24:  # stop short repeating loops
-                tail = ids[0, -12:].tolist()
-                if any(tail == tail[-k:] * (12 // k) for k in (1, 2, 3, 4)):
-                    break
-        return ids[0].tolist()
+        ids = greedy_decode(self, enc_out, bos_id, eos_id, max_new_tokens,
+                            cross_key_mask=cross_key_mask, no_repeat_cycle=no_repeat_cycle)
+        return [bos_id] + ids[0]
 
     def forward(self, pixel_values, input_ids, input_lengths=None, text_padding_mask=None,
                 ctc_labels=None, ctc_label_lengths=None):

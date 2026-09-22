@@ -4,13 +4,15 @@ from PIL import Image
 from pathlib import Path
 from typing import Literal, Any
 from safetensors.torch import load_file
-from pydantic import BaseModel, model_validator, PrivateAttr
+from pydantic import BaseModel, PrivateAttr
 from inference.layout_detection import get_textline_boxes, crop_image
 from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
 from src.telugu_ocr.models.encoder_decoder import GPTConfig, EncoderDecoder
 from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 from src.telugu_ocr.data.preprocess import resize_line_image
-from scripts.eval.encoder_decoder import beam_search, ctc_hyp_logprobs
+from src.telugu_ocr.decoding import (
+    beam_search, ctc_collapse, ctc_hyp_logprobs, greedy_decode,
+)
 
 
 
@@ -26,6 +28,9 @@ def get_device():
 
 
 
+DecodeMode = Literal["ctc", "llm-greedy", "llm-beam", "joint"]
+
+
 class InferenceConfig(BaseModel):
     """Config for running the OCR"""
     ctc_encoder_config: CTCEncoderConfig
@@ -34,7 +39,6 @@ class InferenceConfig(BaseModel):
     vocab_path: Path | str
     _tokenizer: TeluguGraphemeTokenizer = PrivateAttr()
     pad_token_id: int | None = None
-    vocab_size: int | None = None
     blank_id: int | None = None
     device: str = get_device()
     joint_weight: float = 0.3
@@ -44,54 +48,15 @@ class InferenceConfig(BaseModel):
 
     def model_post_init(self, context: Any, /) -> None:
         self._tokenizer = TeluguGraphemeTokenizer(vocab_file=self.vocab_path)
-
-    @model_validator(mode="after")
-    def set_pad_token_id(self):
+        size = len(self._tokenizer)
+        # Check if the vocab sizes of both encoder and decoder are the same.
+        if {self.ctc_encoder_config.vocab_size, self.decoder_config.vocab_size} != {size}:
+            raise ValueError(
+                f"vocab_size mismatch: tokenizer={size}, "
+                f"encoder={self.ctc_encoder_config.vocab_size}, "
+                f"decoder={self.decoder_config.vocab_size}")
         self.pad_token_id = self._tokenizer.pad_token_id
-        return self
-
-    @model_validator(mode="after")
-    def set_vocab_size(self):
-        self.vocab_size = len(self._tokenizer)
-        return self
-
-    @model_validator(mode='after')
-    def set_blank_id(self):
-        self.blank_id = len(self._tokenizer)
-        return self
-
-
-
-@torch.no_grad()
-def ctc_greedy_decoding(pred_ids: torch.Tensor, blank_id: int):
-    """Convert the predicted ids to token ids. Remove consecutive repeats and blanks"""
-
-    if len(pred_ids.shape) > 2:
-        raise AssertionError("pred_ids should be either 1D or 2D only")
-
-    ids = pred_ids.tolist()
-
-    if len(pred_ids.shape) == 1:
-        token_ids, prev = [], None
-        for id in ids:
-            if id!= prev and id != blank_id:
-                token_ids.append(id)
-            prev = id
-    else:
-        token_ids = []
-        for i in range(len(ids)):
-            token_lst, prev = [], None
-            for id in ids[i]:
-                if id != prev and id != blank_id:
-                    token_lst.append(id)
-                prev = id
-            token_ids.append(token_lst)
-
-    return token_ids
-
-
-
-
+        self.blank_id = size
 
 
 class OCRInference:
@@ -168,47 +133,53 @@ class OCRInference:
         return torch.concatenate(padded, dim=0), input_lengths
 
 
-    def run_ctc(self, images: Image.Image | list[Image.Image], batch_size: int = 32):
-        if isinstance(images, Image.Image):
-            img = self.preprocess_image(images).to(self.device)
+    def _encode(self, tensors: list[torch.Tensor]):
+        """Padded batch -> (raw encoder frames, bridged frames, cross-attention key mask)."""
+        batch, input_lengths = self.create_batch(tensors)
+        enc_raw, key_padding_mask = self.model.encoder_model.encode(
+            batch.to(self.device), input_lengths.to(self.device))
+        cross_key_mask = (None if key_padding_mask is None
+                          else (~key_padding_mask).unsqueeze(1).unsqueeze(2))
+        return enc_raw, self.model.enc_to_dec(enc_raw), cross_key_mask
 
+    def run_ctc(self, images: list[Image.Image], batch_size: int = 32) -> list[str]:
+        """Greedy CTC over the encoder's per-frame argmax."""
+        tensors = [self.preprocess_image(img) for img in images]
+
+        texts = []
+        for i in range(0, len(tensors), batch_size):
+            batch, input_lengths = self.create_batch(tensors[i: i + batch_size])
             with torch.inference_mode():
-                out = self.model.encoder_model(img)
-            token_ids = ctc_greedy_decoding(out['logits'][0], blank_id=self.config.blank_id)
-            text = self.convert_ids_to_tokens(token_ids)
-            return text
-        elif isinstance(images, list) and all([isinstance(img, Image.Image) for img in images]):
-            tensors = [self.preprocess_image(img) for img in images]
+                out = self.model.encoder_model(batch.to(self.device),
+                                               input_lengths=input_lengths.to(self.device))
+            texts.extend(self.tokenizer.decode(ctc_collapse(row, self.config.blank_id))
+                         for row in out["logits"].tolist())
+        return texts
 
-            texts = []
-            for i in range(0, len(tensors), batch_size):
-                img_batch, input_lengths = self.create_batch(tensors[i: i + batch_size])
-                with torch.inference_mode():
-                    out = self.model.encoder_model(img_batch.to(self.device),
-                                                   input_lengths=input_lengths.to(self.device))
-                token_ids = ctc_greedy_decoding(out['logits'], blank_id=self.config.blank_id)
-                texts.extend(self.convert_ids_to_tokens(token_ids))
-            return texts
-        else:
-            raise TypeError(f"Expected a PIL image or a list of them, got {type(images)}")
+    def run_greedy(self, images: list[Image.Image], batch_size: int = 32) -> list[str]:
+        """Greedy decode through the text decoder, batched.
 
+        Beam search cannot batch this way -- it spends the batch dimension on its own
+        beams -- so `llm-beam` and `joint` stay one image at a time in `run_llm`.
+        """
+        tensors = [self.preprocess_image(img) for img in images]
 
-    def run_llm(self, image: Image.Image, decode_mode: Literal["llm-greedy", "llm-beam", "joint"]):
-        """Runs the encoder_decoder for a single sample with the configured strategy."""
-        pixels = self.preprocess_image(image).to(self.device)
+        texts = []
+        for i in range(0, len(tensors), batch_size):
+            with torch.inference_mode():
+                _, bridged, cross_key_mask = self._encode(tensors[i: i + batch_size])
+                rows = greedy_decode(self.model, bridged,
+                                     self.tokenizer.bos_token_id, self.tokenizer.eos_token_id,
+                                     self.config.max_new_tokens, cross_key_mask=cross_key_mask)
+            texts.extend(self.tokenizer.decode(r, skip_special_tokens=True).strip()
+                         for r in rows)
+        return texts
 
+    def run_llm(self, image: Image.Image, decode_mode: Literal["llm-beam", "joint"]) -> str:
+        """Beam search over one image, optionally rescored against the CTC head."""
         with torch.inference_mode():
-            # One encoder forward feeds whichever decoder runs below.
-            enc_raw, _ = self.model.encoder_model.encode(pixels, None)
-            bridged = self.model.enc_to_dec(enc_raw)
-
-            if decode_mode == "llm-greedy":
-                ids = self.model.generate(pixels,
-                                          self.tokenizer.bos_token_id,
-                                          self.tokenizer.eos_token_id,
-                                          max_new_tokens=self.config.max_new_tokens,
-                                          enc_out=bridged)
-                return self.tokenizer.decode(ids, skip_special_tokens=True).strip()
+            # One encoder forward feeds both the beam and the CTC rescorer.
+            enc_raw, bridged, _ = self._encode([self.preprocess_image(image)])
 
             nbest = beam_search(self.model, bridged, self.tokenizer.bos_token_id,
                                 self.tokenizer.eos_token_id, self.config.beam_width,
@@ -231,35 +202,24 @@ class OCRInference:
                 combined = attn_lp
             return texts[int(combined.argmax())]
 
-
-    def run(self, images: Image.Image | list[Image.Image], decode_mode: Literal["ctc", "llm-greedy", "llm-beam", "joint"], batch_size: int = 16):
-        """Run the images through the OCR pipeline"""
-        assert decode_mode in ["ctc", "llm-greedy", "llm-beam", "joint"], "Invalid decode_mode"
+    def run(self, images: Image.Image | list[Image.Image], decode_mode: DecodeMode,
+            batch_size: int = 32) -> str | list[str]:
+        """Transcribe one image or a list of them, returning output shaped like the input."""
+        single = isinstance(images, Image.Image)
+        batch = [images] if single else images
+        if not (isinstance(batch, list) and all(isinstance(im, Image.Image) for im in batch)):
+            raise TypeError(f"Expected a PIL image or a list of them, got {type(images)}")
 
         if decode_mode == "ctc":
-            output = self.run_ctc(images, batch_size)
-            return output
-
+            texts = self.run_ctc(batch, batch_size)
+        elif decode_mode == "llm-greedy":
+            texts = self.run_greedy(batch, batch_size)
+        elif decode_mode in ("llm-beam", "joint"):
+            texts = [self.run_llm(img, decode_mode) for img in batch]
         else:
-            if isinstance(images, Image.Image):
-                return self.run_llm(images, decode_mode)
-            elif isinstance(images, list) and all([isinstance(img, Image.Image) for img in images]):
-                texts = []
-                for i in range(len(images)):
-                    texts.append(self.run_llm(images[i], decode_mode))
-                return texts
-            else:
-                raise ValueError("Got unexpected type in the input")
+            raise ValueError(f"Unknown decode_mode {decode_mode!r}")
 
-
-
-
-
-
-
-
-
-
+        return texts[0] if single else texts
 
 
 if __name__ == '__main__':
