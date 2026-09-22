@@ -3,9 +3,8 @@ import torch
 from PIL import Image
 from pathlib import Path
 from typing import Literal, Any
-from dataclasses import dataclass
 from inference.layout_detection import get_textline_boxes, crop_image
-from src.telugu_ocr.models.image_encoder import ImageEncoderCTC, CTCEncoderConfig
+from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
 from src.telugu_ocr.models.encoder_decoder import GPTConfig, EncoderDecoder
 from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
 from src.telugu_ocr.data.preprocess import resize_line_image
@@ -23,23 +22,6 @@ def get_device():
     else:
         return "cpu"
 
-
-
-# @dataclass
-# class InferenceConfig:
-#     """Config for running the OCR"""
-#     ctc_encoder_config: CTCEncoderConfig
-#     decoder_config: GPTConfig
-#     encoder_decoder_path: Path | str
-#     tokenizer: TeluguGraphemeTokenizer
-#     pad_token_id: int = 2043
-#     ctc_loss_weight: float = 0.3
-#     device: str = get_device()
-#     joint_weight: float = 0.3
-#     beam_width: int = 5
-#     max_new_tokens: int = 256
-#     blank_id: int = 2048
-#     beam_len_alpha: float = 0.0
 
 
 class InferenceConfig(BaseModel):
@@ -279,7 +261,6 @@ class OCRInference:
 
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
     from pathlib import Path
 
     path_to_image = "/Users/xai/Desktop/page.png"
@@ -287,11 +268,6 @@ if __name__ == '__main__':
     image = Image.open(path_to_image)
     image_layout = get_textline_boxes(image, plot_image=False)
     line_images = crop_image(image, image_layout)
-
-
-    # for img in line_images:
-    #     plt.imshow(img, cmap='gray')
-    #     plt.show()
 
 
     print(f"Running on : {get_device()}")
