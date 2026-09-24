@@ -1,11 +1,9 @@
-
 import torch
 from PIL import Image
 from pathlib import Path
 from typing import Literal, Any
 from safetensors.torch import load_file
 from pydantic import BaseModel, PrivateAttr
-from inference.layout_detection import get_textline_boxes, crop_image
 from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
 from src.telugu_ocr.models.encoder_decoder import GPTConfig, EncoderDecoder
 from src.telugu_ocr.tokenizer.grapheme import TeluguGraphemeTokenizer
@@ -13,18 +11,9 @@ from src.telugu_ocr.data.preprocess import resize_line_image
 from src.telugu_ocr.decoding import (
     beam_search, ctc_collapse, ctc_hyp_logprobs, greedy_decode,
 )
+from .models import DetectorOutput, Line, OCROutput
+from .utils import crop_image, get_device, VALID_IMAGE_TYPES
 
-
-
-
-
-def get_device():
-    if torch.cuda.is_available():
-        return "cuda"
-    elif torch.mps.is_available():
-        return "mps"
-    else:
-        return "cpu"
 
 
 
@@ -80,21 +69,14 @@ class OCRInference:
 
     @staticmethod
     def load_model(file_path: str, device: str = "cpu"):
-        if file_path.endswith("safetensors"):
+        if file_path.endswith(".safetensors"):
             weights = load_file(file_path)
-        elif file_path.endswith("pt") or file_path.endswith("pts"):
+        elif file_path.endswith(".pt") or file_path.endswith(".pts"):
             weights = torch.load(file_path, map_location=device)
         else:
             raise ValueError("Got unexpected model type. Model extension should be one of [`safetensors`, `pt`, `pts`]")
         return weights
 
-
-
-    def convert_ids_to_tokens(self, token_ids: list[int] | list[list[int]]):
-        # An all-blank line decodes to [], which has no token_ids[0] to inspect.
-        if token_ids and isinstance(token_ids[0], list):
-            return [self.tokenizer.decode(ids) for ids in token_ids]
-        return self.tokenizer.decode(token_ids)
 
     def preprocess_image(self, img: Image.Image):
         """Grayscale + resize to the encoder's geometry -> (1, 1, H, W) in [-1, 1]."""
@@ -178,7 +160,7 @@ class OCRInference:
     def run_llm(self, image: Image.Image, decode_mode: Literal["llm-beam", "joint"]) -> str:
         """Beam search over one image, optionally rescored against the CTC head."""
         with torch.inference_mode():
-            # One encoder forward feeds both the beam and the CTC rescorer.
+            # One encoder forward feeds both the beam and the CTC re-scorer.
             enc_raw, bridged, _ = self._encode([self.preprocess_image(image)])
 
             nbest = beam_search(self.model, bridged, self.tokenizer.bos_token_id,
@@ -222,24 +204,61 @@ class OCRInference:
         return texts[0] if single else texts
 
 
+    def get_text(self, detector_output: DetectorOutput, decode_mode: DecodeMode, batch_size: int = 32):
+        """Run the OCR on the detector output"""
+
+        image = detector_output.image
+        line_boxes = detector_output.detected_lines
+
+
+        line_images = crop_image(image, [line_box.bbox for line_box in line_boxes])
+
+        texts = self.run(line_images, decode_mode=decode_mode, batch_size=batch_size)
+
+        assert len(texts) == len(line_images), "Mis-match in the number of line images and texts"
+
+        lines = []
+        for i in range(len(line_boxes)):
+            lines.append(Line(id=line_boxes[i].id, bbox=line_boxes[i].bbox, text=texts[i]))
+
+        return OCROutput(lines=lines)
+
+
+    def from_image(self, image: VALID_IMAGE_TYPES, detector_kwargs: dict):
+        """Run the complete pipeline"""
+
+
+
+
+class OCRPipeline:
+    """Run the complete OCR pipeline"""
+
+    def __init__(self, inference_config: InferenceConfig, detector_kwargs: dict):
+        self.detector = TextDetector(**detector_kwargs)
+        self.inference_engine = OCRInference(inference_config)
+
+    def run(self, image: VALID_IMAGE_TYPES, decode_mode: DecodeMode, deskew: bool = True, preprocess_image: bool = False, plot_image: bool = False, batch_size: int = 32):
+
+        detector_output = self.detector.detect(image, deskew=deskew, preprocess_image=preprocess_image, plot_image=plot_image)
+
+        output = self.inference_engine.get_text(detector_output, decode_mode=decode_mode, batch_size=batch_size)
+
+        return output
+
+
+
 if __name__ == '__main__':
-    from pathlib import Path
+    from .layout_detection import TextDetector
 
-    path_to_image = "/Users/xai/Desktop/page.png"
-
-    image = Image.open(path_to_image)
-    image_layout = get_textline_boxes(image, plot_image=False)
-    line_images = crop_image(image, image_layout)
-
+    path_to_image = "/Users/xai/Desktop/page1.png"
 
     print(f"Running on : {get_device()}")
-
 
 
     gpt_config = GPTConfig(
         vocab_size=2048,
         embed_dim=512,
-        hidden_dim=1368,  # 2.67 * 512 = 2/3 * 4 * hidden_dim
+        hidden_dim=1368,
         num_heads=8,
         num_layers=16,
         ctx_len=256,
@@ -249,26 +268,27 @@ if __name__ == '__main__':
 
     ROOT = Path(__file__).resolve().parent.parent
 
-    inference_config = InferenceConfig(
-        # max_image_width is 2048 for every trained checkpoint; the dataclass default
-        # (1024) describes no artifact -- see configs/models/ctc_encoder_2048.yaml.
+    config = InferenceConfig(
         ctc_encoder_config=CTCEncoderConfig(max_image_width=2048, max_frames=256),
         decoder_config=gpt_config,
         encoder_decoder_path=ROOT / "models/encoder_decoder/results_stage_2_mid/telugu-ocr-stage2/checkpoint-34000/model.safetensors",
         vocab_path=str(ROOT / "src/telugu_ocr/tokenizer/assets/telugu-vocab.json"),
     )
 
+    detector = TextDetector()
+    detected_lines = detector.detect(path_to_image, deskew=False)
 
+    ocr_engine = OCRInference(config)
 
-    ocr_engine = OCRInference(inference_config)
-    num = 4
-    # CTC single
-    out = ocr_engine.run(line_images[num], decode_mode="ctc", batch_size=16)
-    print(f"Decode Strategy - CTC        : {out}\n")
-    out = ocr_engine.run(line_images[num], decode_mode="llm-greedy", batch_size=16)
-    print(f"Decode Strategy - llm-greedy : {out}\n")
-    out = ocr_engine.run(line_images[num], decode_mode="llm-beam", batch_size=16)
-    print(f"Decode Strategy - llm-beam   : {out}\n")
-    out = ocr_engine.run(line_images[num], decode_mode="joint", batch_size=16)
-    print(f"Decode Strategy - joint      : {out}\n")
- 
+    # Full page test
+    output = ocr_engine.get_text(detected_lines, decode_mode="ctc")
+    for line in output.lines:
+        print(line.text)
+
+    print('='*50)
+
+    # Test full pipeline
+    pipeline = OCRPipeline(config, detector_kwargs={})
+    output = pipeline.run(path_to_image, decode_mode="joint")
+    for line in output.lines:
+        print(line.text)
