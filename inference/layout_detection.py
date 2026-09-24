@@ -1,73 +1,112 @@
-
+import cv2
 import tesserocr
+import numpy as np
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
+from .models import LineInfo, DetectorOutput
+from .deskew_utils import determine_skew, rotate_image
+from .utils import VALID_IMAGE_TYPES, read_image
 
 
-def get_textline_boxes(image: Image.Image, lang="tel", plot_image: bool = False):
+class TextDetector:
+    def __init__(self, tessdata_path: str = "/opt/homebrew/opt/tesseract/share/tessdata",
+                 lang: str = 'tel', tesseract_mode = tesserocr.PSM.AUTO):
+        self.tessdata_path = tessdata_path
+        self.lang = lang
+        self.tesseract_mode = tesseract_mode
 
-    with tesserocr.PyTessBaseAPI(
-            path="/opt/homebrew/opt/tesseract/share/tessdata",
-            lang=lang) as api:
-        api.SetPageSegMode(tesserocr.PSM.AUTO)
-        api.SetImage(image)
-        api.Recognize()
+    @staticmethod
+    def preprocess_for_tesseract(image: Image.Image):
+        """ Preprocess an image for Tesseract OCR. """
+        # Convert to grayscale
+        if image.mode != 'L':
+            gray = np.array(image.convert('L'))
+        else:
+            gray = np.array(image)
 
-        iterator = api.GetIterator()
-        boxes = []
+        # Improve local contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
 
-        while iterator:
-            bbox = iterator.BoundingBox(tesserocr.RIL.TEXTLINE)
-            if bbox:
-                boxes.append(bbox)
+        # Light denoising while preserving character boundaries
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-            if not iterator.Next(tesserocr.RIL.TEXTLINE):
-                break
+        # Adaptive thresholding for uneven backgrounds
+        binary = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            11
+        )
 
-    if plot_image:
-        plot_img = image.copy()
-        draw = ImageDraw.Draw(plot_img)
-
-        for bbox in boxes:
-            draw.rectangle(bbox)
-
-        plt.imshow(plot_img)
-        plt.show()
-
-    return boxes
+        return binary
 
 
-def crop_image(image: Image.Image, bboxes: list[tuple[float|int, float|int, float|int, float|int]]):
-    """Crop image based on the bounding boxes provided"""
+    def detect(self, image: VALID_IMAGE_TYPES, deskew: bool = True, preprocess_image: bool = False, plot_image: bool = False):
+        """Detect the text lines in the image"""
 
-    cropped_images = []
+        image = read_image(image)
 
-    for bbox in bboxes:
-        cimg = image.crop(bbox)
-        cropped_images.append(cimg)
+        if preprocess_image:
+            image = self.preprocess_for_tesseract(image)
 
-    return cropped_images
+        if deskew:
+            if isinstance(image, Image.Image):
+                image = np.array(image)
+            skew_angle = determine_skew(image)
+            image = rotate_image(image, skew_angle)
+
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
+
+        with tesserocr.PyTessBaseAPI(
+                path=self.tessdata_path,
+                lang=self.lang) as api:
+
+            api.SetPageSegMode(self.tesseract_mode)
+            api.SetImage(image)
+            api.Recognize()
+
+            iterator = api.GetIterator()
+            detected_boxes = []
+
+            idx = 0
+            while iterator:
+                bbox = iterator.BoundingBox(tesserocr.RIL.TEXTLINE)
+                if bbox:
+                    detected_boxes.append(LineInfo(id=idx, bbox=bbox))
+                    idx += 1
+
+                if not iterator.Next(tesserocr.RIL.TEXTLINE):
+                    break
+
+            if plot_image:
+                plot_img = image.copy()
+                draw = ImageDraw.Draw(plot_img)
+
+                for line in detected_boxes:
+                    draw.rectangle(line.bbox, outline='green', width=2)
+
+                plt.imshow(plot_img)
+                plt.show()
+
+            detector_output = DetectorOutput(detected_lines=detected_boxes, image=image)
+            return detector_output
 
 
 
 
 if __name__ == '__main__':
 
-    from PIL import ImageDraw
+    img = Image.open('/Users/xai/Desktop/page1.png')
 
+    detector = TextDetector()
+    output = detector.detect(image=img, plot_image=True)
 
-    # img = Image.open('/Users/xai/Desktop/Screenshot 2026-09-21 at 2.09.44 PM.png')
-    img = Image.open('/Users/xai/Desktop/page.png')
-    bboxes = get_textline_boxes(img)
+    for line in output.detected_lines:
+        print(line.id, line.bbox)
 
-    print(bboxes)
-
-    draw = ImageDraw.Draw(img)
-
-    for bbox in bboxes:
-        draw.rectangle(bbox, outline='green')
-
-    plt.imshow(img)
-    plt.show()
 
 
