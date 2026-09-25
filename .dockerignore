@@ -9,9 +9,10 @@ scripts/
 tests/
 tools/
 .env
+.git/
 .gitignore
 .venv/
-__pycache__/
+**/__pycache__
 .python-version
 CLAUDE.md
 LICENSE
