@@ -8,20 +8,16 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
 
-# Copy the src files also
-COPY src/telugu_ocr/models/image_encoder.py ./src/telugu_ocr/models/
-COPY src/telugu_ocr/models/encoder_decoder.py ./src/telugu_ocr/models/
-COPY src/telugu_ocr/tokenizer/grapheme.py ./src/telugu_ocr/tokenizer
-COPY src/telugu_ocr/decoding.py ./src/telugu_ocr/
-COPY src/telugu_ocr/data/preprocess.py ./src/telugu_ocr/data/
-
-
-COPY inference/* ./
-
+COPY inference/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download the model and vocab file
-RUN python set_up.py
+COPY inference/ ./inference/
+COPY src/telugu_ocr ./src/telugu_ocr/
 
-CMD ["uvicorn", "ocr_server:app", "--host", "0.0.0.0", "--port", "8080"]
+# Download the model and vocab file
+RUN python -m  inference.set_up
+
+EXPOSE 8080
+CMD ["uvicorn", "inference.ocr_server:app", "--host", "0.0.0.0", "--port", "8080"]
