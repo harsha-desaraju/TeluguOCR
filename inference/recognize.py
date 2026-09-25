@@ -76,6 +76,12 @@ class OCRInference:
             weights = torch.load(file_path, map_location=device)
         else:
             raise ValueError("Got unexpected model type. Model extension should be one of [`safetensors`, `pt`, `pts`]")
+
+        # The Hub checkpoint is a PreTrainedModel wrapper whose inner module is `model`,
+        # so every tensor is prefixed; the training checkpoints are not. Same 388 tensors
+        # either way -- strip the prefix rather than keep two loading paths.
+        if weights and all(k.startswith("model.") for k in weights):
+            weights = {k[len("model."):]: v for k, v in weights.items()}
         return weights
 
 

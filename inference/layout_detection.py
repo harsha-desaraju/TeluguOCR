@@ -5,13 +5,13 @@ import cv2
 import tesserocr
 import numpy as np
 from PIL import Image, ImageDraw
-import matplotlib.pyplot as plt
 from .models import LineInfo, DetectorOutput
 from .deskew_utils import determine_skew, rotate_image
 from .utils import VALID_IMAGE_TYPES, read_image
 
 
-TESSDATA_PATH = os.getenv("TESSDATA_PREFIX")
+# The container sets TESSDATA_PREFIX; the fallback keeps a Homebrew mac working.
+TESSDATA_PATH = os.getenv("TESSDATA_PREFIX", "/opt/homebrew/opt/tesseract/share/tessdata")
 
 class TextDetector:
     def __init__(self, tessdata_path: str = TESSDATA_PATH,
@@ -90,6 +90,8 @@ class TextDetector:
                     break
 
         if plot_image:
+            import matplotlib.pyplot as plt   # debug-only; keep it out of the server image
+
             plot_img = page.copy()
             draw = ImageDraw.Draw(plot_img)
             for line in detected_boxes:

@@ -3,7 +3,6 @@
 from io import BytesIO
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from pathlib import Path
 from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
 from src.telugu_ocr.models.text_decoder import GPTConfig
 from .layout_detection import TextDetector
@@ -49,8 +48,8 @@ async def detect_text(
     image_bytes = await image.read()
     try:
         image = Image.open(BytesIO(image_bytes))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Bad request. Invalid input in the image")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Bad request. Invalid input in the image")
 
 
     detector_output = detector.detect(image, deskew, preprocess_image, False)
@@ -72,7 +71,10 @@ async def get_text(
             batch_size: int = Form(16)
     ):
     image_bytes = await image.read()
-    image = Image.open(BytesIO(image_bytes))
+    try:
+        image = Image.open(BytesIO(image_bytes))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Bad request. Invalid input in the image")
 
     detector_output = detector.detect(image, deskew, preprocess_image, False)
 
