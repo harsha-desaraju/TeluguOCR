@@ -1,5 +1,6 @@
 """Text-line detection: Tesseract finds the line boxes, this returns them with the page."""
 
+import os
 import cv2
 import tesserocr
 import numpy as np
@@ -10,8 +11,10 @@ from .deskew_utils import determine_skew, rotate_image
 from .utils import VALID_IMAGE_TYPES, read_image
 
 
+TESSDATA_PATH = os.getenv("TESSDATA_PREFIX")
+
 class TextDetector:
-    def __init__(self, tessdata_path: str = "/opt/homebrew/opt/tesseract/share/tessdata",
+    def __init__(self, tessdata_path: str = TESSDATA_PATH,
                  lang: str = 'tel', tesseract_mode=tesserocr.PSM.AUTO) -> None:
         self.tessdata_path = tessdata_path
         self.lang = lang
