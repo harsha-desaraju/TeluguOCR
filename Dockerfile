@@ -2,8 +2,9 @@ FROM python:3.12-slim
 WORKDIR /app
 
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
+    tesseract-ocr-tel \
     libtesseract-dev \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -17,7 +18,7 @@ COPY inference/ ./inference/
 COPY src/telugu_ocr ./src/telugu_ocr/
 
 # Download the model and vocab file
-RUN python -m  inference.set_up
+RUN python -m inference.set_up
 
 EXPOSE 8080
 CMD ["uvicorn", "inference.ocr_server:app", "--host", "0.0.0.0", "--port", "8080"]
