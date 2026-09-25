@@ -1,3 +1,7 @@
+"""Skew estimation by Hough transform, and the rotation that corrects it.
+
+This code is a copy of the code from deskew python package (with little modifications).
+"""
 
 import cv2
 import warnings
@@ -82,14 +86,7 @@ def determine_skew_dev(
         freqs.setdefault(peak, 0)
         freqs[peak] += 1
 
-    sorted_keys = sorted(freqs.keys(), key=freqs.get, reverse=True)  # type: ignore[arg-type]
-    max_freq = freqs[sorted_keys[0]]
-
-    angle = None
-    for sorted_key in sorted_keys:
-        if freqs[sorted_key] == max_freq:
-            angle = sorted_key
-            break
+    angle = max(freqs, key=freqs.get)  # type: ignore[arg-type]
 
     return (
         angle,
@@ -106,6 +103,7 @@ def determine_skew(
     min_angle: float | None = None,
     max_angle: float | None = None,
     min_deviation: float = 1.0,
+    max_skew: float | None = 10.0,
 ) -> np.float64 | None:
     """
     Calculate skew angle.
@@ -128,6 +126,10 @@ def determine_skew(
         Maximum angle to consider
     min_deviation: float
         Minimum deviation between angles
+    max_skew: float
+        Reject (return None) beyond this many degrees. Scans are not skewed by 30
+        degrees; such an estimate means the Hough peak came from a page edge or a
+        binarisation artifact, and acting on it destroys the page. None disables.
 
     Returns
     -------
@@ -147,36 +149,43 @@ def determine_skew(
         min_deviation=np.deg2rad(min_deviation),
         angle_pm_90=angle_pm_90,
     )
-    return None if angle is None else np.rad2deg(angle)
+    if angle is None:
+        return None
+    degrees = np.rad2deg(angle)
+    if max_skew is not None and abs(degrees) > max_skew:
+        return None
+    return degrees
 
 
 
 
-def rotate_image(image, angle):
+def rotate_image(image: np.ndarray, angle: float | None) -> np.ndarray:
+    """Rotate about the centre onto a canvas grown to fit, padding with white."""
+    if not angle:
+        return image
 
-    if angle:
-        h, w = image.shape[:2]
-        center = (w / 2, h / 2)
+    h, w = image.shape[:2]
+    center = (w / 2, h / 2)
 
-        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-        cos = abs(matrix[0, 0])
-        sin = abs(matrix[0, 1])
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    cos = abs(matrix[0, 0])
+    sin = abs(matrix[0, 1])
 
-        new_w = int(h * sin + w * cos)
-        new_h = int(h * cos + w * sin)
+    # ceil, not int: truncating leaves the canvas a fraction short and clips a corner.
+    new_w = int(np.ceil(h * sin + w * cos))
+    new_h = int(np.ceil(h * cos + w * sin))
 
-        matrix[0, 2] += new_w / 2 - center[0]
-        matrix[1, 2] += new_h / 2 - center[1]
+    matrix[0, 2] += new_w / 2 - center[0]
+    matrix[1, 2] += new_h / 2 - center[1]
 
-        return cv2.warpAffine(
-            image,
-            matrix,
-            (new_w, new_h),
-            flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(255, 255, 255)
-        )
-    return image
+    return cv2.warpAffine(
+        image,
+        matrix,
+        (new_w, new_h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
 
 
 if __name__ == '__main__':

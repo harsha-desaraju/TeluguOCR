@@ -1,44 +1,37 @@
+"""Shared helpers for the inference package: image coercion, cropping, device pick."""
 
-import torch
 import numpy as np
+import torch
 from PIL import Image
 from pathlib import Path
 from typing import TypeAlias
 
 
-
 VALID_IMAGE_TYPES: TypeAlias = Path | str | Image.Image | np.ndarray
 
 
-def crop_image(image: Image.Image, bboxes: list[tuple[float | int, float | int, float | int, float | int]]):
+def crop_image(image: Image.Image,
+               bboxes: list[tuple[float | int, float | int, float | int, float | int]]
+               ) -> list[Image.Image]:
     """Crop image based on the bounding boxes provided"""
-
-    cropped_images = []
-
-    for bbox in bboxes:
-        cimg = image.crop(bbox)
-        cropped_images.append(cimg)
-
-    return cropped_images
+    return [image.crop(bbox) for bbox in bboxes]
 
 
-def read_image(image: VALID_IMAGE_TYPES):
+def read_image(image: VALID_IMAGE_TYPES) -> Image.Image:
     """Read image and return PIL image"""
-    if isinstance(image, Path) or isinstance(image, str):
-        image = Image.open(str(image))
-    elif isinstance(image, np.ndarray):
-        image = Image.fromarray(image)
-    elif isinstance(image, Image.Image):
-        image = image
-    else:
-        raise TypeError(f"Got image of unexpected type. Expected one of {VALID_IMAGE_TYPES}. Got {type(image)}")
-    return image
+    if isinstance(image, (Path, str)):
+        return Image.open(str(image))
+    if isinstance(image, np.ndarray):
+        return Image.fromarray(image)
+    if isinstance(image, Image.Image):
+        return image
+    raise TypeError(
+        f"Got image of unexpected type. Expected one of {VALID_IMAGE_TYPES}. Got {type(image)}")
 
 
-def get_device():
+def get_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
-    elif torch.mps.is_available():
+    if torch.mps.is_available():
         return "mps"
-    else:
-        return "cpu"
+    return "cpu"

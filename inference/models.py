@@ -1,18 +1,16 @@
+"""Pydantic records passed between the detector and the recognizer."""
 
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
 
-
-class Line(BaseModel):
-    id: int
-    bbox: tuple[int|float, int|float, int|float, int|float]
-    text: str
-
-
 class LineInfo(BaseModel):
     id: int
-    bbox: tuple[int|float, int|float, int|float, int|float]
+    bbox: tuple[int | float, int | float, int | float, int | float]
+
+
+class Line(LineInfo):
+    text: str
 
 
 class DetectorOutput(BaseModel):

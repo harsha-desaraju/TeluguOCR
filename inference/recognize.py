@@ -11,6 +11,7 @@ from src.telugu_ocr.data.preprocess import resize_line_image
 from src.telugu_ocr.decoding import (
     beam_search, ctc_collapse, ctc_hyp_logprobs, greedy_decode,
 )
+from .layout_detection import TextDetector
 from .models import DetectorOutput, Line, OCROutput
 from .utils import crop_image, get_device, VALID_IMAGE_TYPES
 
@@ -38,7 +39,7 @@ class InferenceConfig(BaseModel):
     def model_post_init(self, context: Any, /) -> None:
         self._tokenizer = TeluguGraphemeTokenizer(vocab_file=self.vocab_path)
         size = len(self._tokenizer)
-        # Check if the vocab sizes of both encoder and decoder are the same.
+        # A mismatch is otherwise silent: the CTC blank lands on a real grapheme.
         if {self.ctc_encoder_config.vocab_size, self.decoder_config.vocab_size} != {size}:
             raise ValueError(
                 f"vocab_size mismatch: tokenizer={size}, "
@@ -49,7 +50,7 @@ class InferenceConfig(BaseModel):
 
 
 class OCRInference:
-    def __init__(self, config: InferenceConfig):
+    def __init__(self, config: InferenceConfig) -> None:
 
         self.model = EncoderDecoder(
             encoder_config=config.ctc_encoder_config,
@@ -68,7 +69,7 @@ class OCRInference:
         self.model.eval()
 
     @staticmethod
-    def load_model(file_path: str, device: str = "cpu"):
+    def load_model(file_path: str, device: str = "cpu") -> dict:
         if file_path.endswith(".safetensors"):
             weights = load_file(file_path)
         elif file_path.endswith(".pt") or file_path.endswith(".pts"):
@@ -78,7 +79,7 @@ class OCRInference:
         return weights
 
 
-    def preprocess_image(self, img: Image.Image):
+    def preprocess_image(self, img: Image.Image) -> torch.Tensor:
         """Grayscale + resize to the encoder's geometry -> (1, 1, H, W) in [-1, 1]."""
         cfg = self.config.ctc_encoder_config
         return resize_line_image(img.convert('L'),
@@ -88,7 +89,7 @@ class OCRInference:
                                  out='pt').unsqueeze(0)
 
 
-    def create_batch(self, images: list[torch.Tensor]):
+    def create_batch(self, images: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Right-pad to the widest image, returning the batch and its valid frame counts.
 
         Zero padding matches OCRCollator, which is what the model was trained on --
@@ -115,7 +116,7 @@ class OCRInference:
         return torch.concatenate(padded, dim=0), input_lengths
 
 
-    def _encode(self, tensors: list[torch.Tensor]):
+    def _encode(self, tensors: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Padded batch -> (raw encoder frames, bridged frames, cross-attention key mask)."""
         batch, input_lengths = self.create_batch(tensors)
         enc_raw, key_padding_mask = self.model.encoder_model.encode(
@@ -204,51 +205,36 @@ class OCRInference:
         return texts[0] if single else texts
 
 
-    def get_text(self, detector_output: DetectorOutput, decode_mode: DecodeMode, batch_size: int = 32):
-        """Run the OCR on the detector output"""
-
-        image = detector_output.image
+    def get_text(self, detector_output: DetectorOutput, decode_mode: DecodeMode,
+                 batch_size: int = 32) -> OCROutput:
+        """Transcribe every detected line of one page."""
         line_boxes = detector_output.detected_lines
-
-
-        line_images = crop_image(image, [line_box.bbox for line_box in line_boxes])
-
+        line_images = crop_image(detector_output.image, [b.bbox for b in line_boxes])
         texts = self.run(line_images, decode_mode=decode_mode, batch_size=batch_size)
 
-        assert len(texts) == len(line_images), "Mis-match in the number of line images and texts"
-
-        lines = []
-        for i in range(len(line_boxes)):
-            lines.append(Line(id=line_boxes[i].id, bbox=line_boxes[i].bbox, text=texts[i]))
-
-        return OCROutput(lines=lines)
-
-
-    def from_image(self, image: VALID_IMAGE_TYPES, detector_kwargs: dict):
-        """Run the complete pipeline"""
-
-
+        return OCROutput(lines=[Line(id=b.id, bbox=b.bbox, text=t)
+                                for b, t in zip(line_boxes, texts)])
 
 
 class OCRPipeline:
     """Run the complete OCR pipeline"""
 
-    def __init__(self, inference_config: InferenceConfig, detector_kwargs: dict):
-        self.detector = TextDetector(**detector_kwargs)
+    def __init__(self, inference_config: InferenceConfig, detector_kwargs: dict | None = None) -> None:
+        self.detector = TextDetector(**(detector_kwargs or {}))
         self.inference_engine = OCRInference(inference_config)
 
-    def run(self, image: VALID_IMAGE_TYPES, decode_mode: DecodeMode, deskew: bool = True, preprocess_image: bool = False, plot_image: bool = False, batch_size: int = 32):
-
-        detector_output = self.detector.detect(image, deskew=deskew, preprocess_image=preprocess_image, plot_image=plot_image)
-
-        output = self.inference_engine.get_text(detector_output, decode_mode=decode_mode, batch_size=batch_size)
-
-        return output
+    def run(self, image: VALID_IMAGE_TYPES, decode_mode: DecodeMode, deskew: bool = False,
+            preprocess_image: bool = False, plot_image: bool = False,
+            batch_size: int = 32) -> OCROutput:
+        """Detect the lines of a page and transcribe them."""
+        detector_output = self.detector.detect(
+            image, deskew=deskew, preprocess_image=preprocess_image, plot_image=plot_image)
+        return self.inference_engine.get_text(
+            detector_output, decode_mode=decode_mode, batch_size=batch_size)
 
 
 
 if __name__ == '__main__':
-    from .layout_detection import TextDetector
 
     path_to_image = "/Users/xai/Desktop/page1.png"
 
