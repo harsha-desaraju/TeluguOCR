@@ -2,7 +2,7 @@
 
 from io import BytesIO
 from PIL import Image
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from pathlib import Path
 from src.telugu_ocr.models.image_encoder import CTCEncoderConfig
 from src.telugu_ocr.models.text_decoder import GPTConfig
@@ -44,10 +44,14 @@ ocr_engine = OCRInference(inference_config)
 @app.post("/detect")
 async def detect_text(
         image: UploadFile = File(...),
-        deskew: bool = False,
-        preprocess_image: bool = False):
+        deskew: bool = Form(False),
+        preprocess_image: bool = Form(False)):
     image_bytes = await image.read()
-    image = Image.open(BytesIO(image_bytes))
+    try:
+        image = Image.open(BytesIO(image_bytes))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Bad request. Invalid input in the image")
+
 
     detector_output = detector.detect(image, deskew, preprocess_image, False)
 
@@ -63,7 +67,7 @@ async def detect_text(
 async def get_text(
             image: UploadFile = File(...),
             decode_mode: DecodeMode = Form(...),
-            deskew: bool = Form(...),
+            deskew: bool = Form(False),
             preprocess_image: bool = Form(False),
             batch_size: int = Form(16)
     ):
@@ -74,6 +78,6 @@ async def get_text(
 
     ocr_output = ocr_engine.get_text(detector_output, decode_mode, batch_size)
 
-    return ocr_output.model_dump_json()
+    return ocr_output
 
 
