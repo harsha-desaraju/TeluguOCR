@@ -73,7 +73,7 @@ line image (1 × 64 × W)
 
 **81.1M parameters total.** The two decoders are complementary and both are kept: CTC is
 monotonic and cannot hallucinate, the LM knows Telugu morphology and fixes what CTC
-garbles. Joint rescoring — re-ranking the LM's beam by `log P_lm + λ · log P_ctc` — beats
+garbles. Joint rescoring — re-ranking the LM's beam by `(1-λ) · log P_lm + λ · log P_ctc` — beats
 either alone, which is the last row versus the second in the table above.
 
 The cross-attention gate is zero-initialised (`tanh(0) = 0`), so at the start of
